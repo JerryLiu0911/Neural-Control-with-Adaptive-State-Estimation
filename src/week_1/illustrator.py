@@ -1,610 +1,733 @@
+from __future__ import annotations
 
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.colors import TwoSlopeNorm
-from sklearn.decomposition import PCA
-import seaborn as sns
-from scipy.signal import welch
 import warnings
+from functools import cached_property
+from pathlib import Path
+from typing import Any, Sequence
 
-# ── colour palette (colour-blind friendly) ──────────────────────────────────
-_PALETTE = [
-    "#0072B2",
-    "#E69F00",
-    "#009E73",
-    "#CC79A7",
-    "#56B4E9",
-    "#D55E00",
-    "#F0E442",
-    "#000000",
-]
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from _helpers import (
+    IndexLike,
+    _ensure_axes,
+    _finalize,
+    _resolve_indices,
+    _signal_noise_decomp,
+)
+from matplotlib.axes import Axes
+from matplotlib.colors import TwoSlopeNorm
+from matplotlib.figure import Figure
+from numpy.typing import ArrayLike, NDArray
+from results import (
+    AutocorrelationResult,
+    CoherenceResult,
+    CrossCorrelationResult,
+    EmbeddingResult,
+    PCAResult,
+    PowerSpectrumResult,
+    SpectrogramResult,
+)
+from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+from scipy.signal import butter, filtfilt, spectrogram, welch
+from scipy.signal import coherence as _coherence
+from scipy.stats import kurtosis, skew
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import mutual_info_regression
+from sklearn.manifold import TSNE
 
 
 class Illustrator:
-    """Explores and visualises a neural dataset of shape ``(Trials, Timepoints, Neurons)``.
-
-    Expected data format: a 3-D NumPy array with shape ``(Trials, Timepoints, Neurons)``.
-
-    **Quick-start**::
-
-        import numpy as np
-        from Illustrator import Illustrator
-
-        data = np.load("ExampleDataset.npy")   # shape (5, 60, 16)
-        ill  = Illustrator(data)
-
-        ill.summary()                 # print dataset statistics
-        ill.plot_neurons()            # raw traces per trial, all neurons
-        ill.plot_mean_and_std()       # trial-averaged activity ± SEM
-        ill.plot_heatmap()            # neuron × time heatmap (trial-averaged)
-        ill.plot_neuron_heatmap()     # per-trial heatmap, optionally centred
-        ill.plot_correlation()        # inter-neuron correlation matrix
-        ill.plot_pca()                # top PCs of population activity
-        ill.plot_variance_explained() # PCA scree plot
-        ill.plot_autocorrelation()    # per-neuron autocorrelation
-        ill.plot_power_spectrum()     # per-neuron power spectra
-
-    :param data: 3-D array of neural activity with axes
-        ``(Trials, Timepoints, Neurons)``.
-    :type data: numpy.ndarray
-    :param dt: Sampling interval in arbitrary time units. Defaults to ``1.0``.
-    :type dt: float
-    :param neuron_labels: Name for each neuron channel.
-        Defaults to ``["Neuron 0", "Neuron 1", …]``.
-    :type neuron_labels: list of str, optional
-    """
-
-    # ------------------------------------------------------------------ init
-    def __init__(self, data: np.ndarray, dt: float = 1.0, neuron_labels: list = None):
-        if data.ndim != 3:
-            raise ValueError(
-                f"data must be 3-D (Trials, Timepoints, Neurons); got {data.ndim}-D."
-            )
-
-        self.data = data  # (T, N_t, N_n)
-        self.n_trials, self.n_time, self.n_neurons = data.shape
-        self.dt = dt
-        self.time = np.arange(self.n_time) * dt
-
-        if neuron_labels is None:
-            self.neuron_labels = [f"Neuron {i}" for i in range(self.n_neurons)]
-        else:
-            if len(neuron_labels) != self.n_neurons:
-                raise ValueError(
-                    f"len(neuron_labels) = {len(neuron_labels)} does not match "
-                    f"the number of neurons ({self.n_neurons})."
-                )
-            self.neuron_labels = list(neuron_labels)
-
-        # ── derived representations ──────────────────────────────────────────
-        # Average across trials → (N_t, N_n)
-        self.trial_averaged_data = data.mean(axis=0)
-
-        # Alias used by several methods
-        self.mean_activity = self.trial_averaged_data
-
-        # Mean across neurons at each (trial, timepoint) → (T, N_t)
-        # NOTE: axis=2 averages over neurons; axis=1 would average over timepoints
-        self.population_averaged_data = data.mean(axis=2)
-
-        # Subtract the per-timepoint population mean from every neuron → (T, N_t, N_n)
-        # [:, :, np.newaxis] broadcasts (T, N_t) → (T, N_t, 1) against (T, N_t, N_n)
-        self.population_centred_data = (
-            data - self.population_averaged_data[:, :, np.newaxis]
-        )
-
-    # ----------------------------------------------------------- text summary
-    def summary(self) -> None:
-        """Print per-neuron statistics: mean, std, min, max, and SNR."""
-        print("=" * 60)
-        print("Dataset summary")
-        print("=" * 60)
-        print(
-            f"  Shape            : {self.data.shape}  "
-            f"(Trials={self.n_trials}, Timepoints={self.n_time}, "
-            f"Neurons={self.n_neurons})"
-        )
-        print(f"  Sampling interval: dt = {self.dt}")
-        print(f"  Total duration   : {self.n_time * self.dt:.3g} time-units")
-        print()
-        print(
-            f"  {'Neuron':<14} {'Mean':>8} {'Std':>8} {'Min':>8} {'Max':>8} {'SNR':>8}"
-        )
-        print("  " + "-" * 56)
-        for i, label in enumerate(self.neuron_labels):
-            col = self.data[:, :, i]
-            mean = col.mean()
-            std = col.std()
-            snr = abs(mean) / std if std > 0 else np.nan
-            print(
-                f"  {label:<14} {mean:>8.3f} {std:>8.3f} "
-                f"{col.min():>8.3f} {col.max():>8.3f} {snr:>8.3f}"
-            )
-        print("=" * 60)
-
-    # ------------------------------------------------------- raw trial traces
-    def plot_neurons(
+    def __init__(
         self,
-        trials=None,
-        neurons=None,
-        plot_mean=False,
-        plot_std=False,
-        population_centred=False,
-    ):
-        """Plot individual trial traces for a chosen set of neurons.
-
-        :param trials: Indices of trials to plot. Defaults to all trials.
-        :type trials: list of int, optional
-        :param neurons: Indices of neurons to plot. Defaults to all neurons.
-        :type neurons: list of int, optional
-        :param plot_mean: Overlay the population mean (mean across neurons) at each timepoint.
-        :type plot_mean: bool
-        :param plot_std: Overlay the standard deviation across neurons at each timepoint.
-        :type plot_std: bool
-        :param population_centred: If ``True``, plot population-centred data (mean across
-            neurons removed at every timepoint) rather than raw activity.
-        :type population_centred: bool
-        :returns: The figure.
-        :rtype: matplotlib.figure.Figure
-        """
-        if trials is None:
-            trials = list(range(self.n_trials))
-        if neurons is None:
-            neurons = list(range(self.n_neurons))
-
-        fig, axes = plt.subplots(len(trials), 1, figsize=(10, 6 * len(trials)))
-        if len(trials) == 1:
-            axes = [axes]
-
-        for trial_index, trial in enumerate(trials):
-            subplot_title = (
-                f"Trial {trial + 1} (population-centred)"
-                if population_centred
-                else f"Trial {trial + 1}"
+        data: ArrayLike,
+        dt: float = 1.0,
+        feature_labels: Sequence[str] | None = None,
+        trial_labels: ArrayLike | None = None,
+    ) -> None:
+        arr = np.asarray(data, dtype=float)
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, :, :]
+        elif arr.ndim != 3:
+            raise ValueError(
+                f"data must be 2-D (T, N) or 3-D (R, T, N); got {arr.ndim}-D."
+            )
+        if dt <= 0:
+            raise ValueError(f"dt must be strictly positive; got {dt}.")
+        if not np.all(np.isfinite(arr)):
+            n_bad = int(np.sum(~np.isfinite(arr)))
+            warnings.warn(
+                f"data contains {n_bad} non-finite values; downstream "
+                f"analyses may produce NaNs.",
+                RuntimeWarning,
+                stacklevel=2,
             )
 
-            for neuron in neurons:
-                # population_averaged_data is (T, N_t) — 2-D, cannot be indexed
-                # by neuron.  Use population_centred_data (T, N_t, N_n) instead.
-                y = (
-                    self.population_centred_data[trial, :, neuron]
-                    if population_centred
-                    else self.data[trial, :, neuron]
-                )
-                axes[trial_index].plot(y, label=f"Neuron {neuron}")
+        self._data: NDArray[np.floating] = arr
+        self.dt: float = float(dt)
+        self.n_trials, self.n_time, self.n_features = arr.shape
+        self.time: NDArray[np.floating] = np.arange(self.n_time) * dt
 
-            if plot_mean:
-                # population_averaged_data[trial] → (N_t,): mean across neurons
-                axes[trial_index].plot(
-                    self.population_averaged_data[trial],
-                    label="Mean activity",
-                    color="black",
-                    linewidth=3,
-                )
+        self.feature_labels: list[str] = self._validate_labels(
+            feature_labels, self.n_features, "feature"
+        )
 
-            if plot_std:
-                std_activity = np.std(self.data[trial, :, :][:, neurons], axis=1)
-                axes[trial_index].plot(
-                    std_activity, label="Std dev", color="red", linewidth=2
-                )
-
-            axes[trial_index].set_title(subplot_title)
-            axes[trial_index].set_xlabel("Timepoints")
-            axes[trial_index].set_ylabel("Activity")
-            axes[trial_index].legend()
-
-        plt.tight_layout()
-        plt.show()
-        return fig
-
-    # ------------------------------------------------- trial-averaged activity
-    def plot_mean_and_std(
-        self, neurons: list = None, show_sem: bool = True, figsize: tuple = (10, 4)
-    ) -> plt.Figure:
-        """Plot trial-averaged activity ± SEM for selected neurons.
-
-        :param neurons: Neuron indices to include. Defaults to all.
-        :type neurons: list of int, optional
-        :param show_sem: Whether to shade the standard error of the mean.
-        :type show_sem: bool
-        :param figsize: Figure size as ``(width, height)``.
-        :type figsize: tuple
-        :returns: The figure.
-        :rtype: matplotlib.figure.Figure
-        """
-        neurons = list(range(self.n_neurons)) if neurons is None else neurons
-
-        fig, ax = plt.subplots(figsize=figsize)
-        sem = self.data[:, :, neurons].std(axis=0) / np.sqrt(
-            self.n_trials
-        )  # (N_t, len(neurons))
-
-        for k, ni in enumerate(neurons):
-            mean = self.mean_activity[:, ni]
-            ax.plot(self.time, mean, lw=2, label=self.neuron_labels[ni])
-            if show_sem:
-                ax.fill_between(
-                    self.time, mean - sem[:, k], mean + sem[:, k], alpha=0.5
-                )
-
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Activity")
-        ax.set_title("Trial-averaged activity (± SEM)")
-        ax.legend(fontsize=7, ncol=4, loc="upper right")
-        fig.tight_layout()
-        plt.show()
-        return fig
-
-    # ------------------------------------------------------- heatmap (neuron × time)
-    def plot_heatmap(self, trial: int = None, figsize: tuple = (10, 5)) -> plt.Figure:
-        """Neuron × Time heatmap of activity.
-
-        :param trial: Single trial to plot. If ``None`` (default), plots the
-            trial-averaged data.
-        :type trial: int, optional
-        :param figsize: Figure size as ``(width, height)``.
-        :type figsize: tuple
-        :returns: The figure.
-        :rtype: matplotlib.figure.Figure
-        """
-        if trial is None:
-            mat = self.mean_activity.T
-            title = "Trial-averaged heatmap (neurons × time)"
+        if trial_labels is None:
+            self.trial_labels: NDArray | None = None
         else:
-            if trial < 0 or trial >= self.n_trials:
-                raise ValueError(f"trial must be in [0, {self.n_trials - 1}].")
-            mat = self.data[trial, :, :].T
-            title = f"Heatmap — Trial {trial} (neurons × time)"
+            tl = np.asarray(trial_labels)
+            if tl.shape != (self.n_trials,):
+                raise ValueError(
+                    f"trial_labels shape {tl.shape} does not match "
+                    f"n_trials={self.n_trials}."
+                )
+            self.trial_labels = tl
 
-        vmax = np.abs(mat).max()
-        norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
+    def __repr__(self) -> str:
+        cond = (
+            f", conditions={len(self.conditions)}"
+            if self.trial_labels is not None
+            else ""
+        )
+        return (
+            f"Illustrator(trials={self.n_trials}, time={self.n_time}, "
+            f"features={self.n_features}, dt={self.dt}{cond})"
+        )
 
-        fig, ax = plt.subplots(figsize=figsize)
+    @staticmethod
+    def _validate_labels(labels: Sequence[str] | None, n: int, name: str) -> list[str]:
+        if labels is None:
+            return [f"{name.capitalize()} {i}" for i in range(n)]
+        if len(labels) != n:
+            raise ValueError(f"len({name}_labels)={len(labels)} does not match n={n}.")
+        if len(set(labels)) != n:
+            warnings.warn(f"duplicate {name} labels detected.", stacklevel=3)
+        return [str(s) for s in labels]
+
+    @property
+    def data(self) -> NDArray[np.floating]:
+        return self._data
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return self._data.shape
+
+    @cached_property
+    def trial_mean(self) -> NDArray[np.floating]:
+        return self._data.mean(axis=0)
+
+    @cached_property
+    def trial_sem(self) -> NDArray[np.floating]:
+        if self.n_trials < 2:
+            return np.zeros((self.n_time, self.n_features))
+        return self._data.std(axis=0, ddof=1) / np.sqrt(self.n_trials)
+
+    @cached_property
+    def population_mean(self) -> NDArray[np.floating]:
+        return self._data.mean(axis=2)
+
+    @cached_property
+    def conditions(self) -> list[Any]:
+        if self.trial_labels is None:
+            return []
+        return list(pd.unique(self.trial_labels))
+
+    def _trial_idx_for(self, condition: Any) -> NDArray:
+        if self.trial_labels is None:
+            raise ValueError("no trial labels were provided.")
+        return np.where(self.trial_labels == condition)[0]
+
+    def select(
+        self,
+        trials: IndexLike = None,
+        features: IndexLike = None,
+        conditions: Sequence[Any] | None = None,
+    ) -> Illustrator:
+        trial_idx = _resolve_indices(trials, self.n_trials, name="trial")
+        if conditions is not None:
+            if self.trial_labels is None:
+                raise ValueError("conditions requested but no trial labels.")
+            cond_mask = np.isin(self.trial_labels, list(conditions))
+            cond_idx = np.flatnonzero(cond_mask).tolist()
+            trial_idx = sorted(set(trial_idx) & set(cond_idx))
+        feat_idx = _resolve_indices(
+            features, self.n_features, self.feature_labels, "feature"
+        )
+        new_data = self._data[np.ix_(trial_idx, np.arange(self.n_time), feat_idx)]
+        new_feature_labels = [self.feature_labels[i] for i in feat_idx]
+        new_trial_labels = (
+            self.trial_labels[trial_idx] if self.trial_labels is not None else None
+        )
+        return type(self)(
+            new_data,
+            dt=self.dt,
+            feature_labels=new_feature_labels,
+            trial_labels=new_trial_labels,
+        )
+
+    def smooth(
+        self,
+        window: float = 5.0,
+        kind: str = "gaussian",
+    ) -> Illustrator:
+        if kind == "gaussian":
+            sigma = window / 2.355
+            smoothed = gaussian_filter1d(self._data, sigma=sigma, axis=1)
+        elif kind == "boxcar":
+            smoothed = uniform_filter1d(self._data, size=max(1, int(window)), axis=1)
+        else:
+            raise ValueError(f"unknown kind {kind!r}; choose 'gaussian' or 'boxcar'.")
+        return type(self)(
+            smoothed,
+            dt=self.dt,
+            feature_labels=self.feature_labels,
+            trial_labels=self.trial_labels,
+        )
+
+    def bandpass(
+        self,
+        low: float | None = None,
+        high: float | None = None,
+        order: int = 4,
+    ) -> Illustrator:
+        fs = 1.0 / self.dt
+        nyq = fs / 2
+        if low is None and high is None:
+            raise ValueError("specify at least one of low or high cutoff.")
+        if low is not None and high is not None:
+            b, a = butter(order, [low / nyq, high / nyq], btype="band")
+        elif high is not None:
+            b, a = butter(order, high / nyq, btype="low")
+        else:
+            assert low is not None
+            b, a = butter(order, low / nyq, btype="high")
+        filtered = filtfilt(b, a, self._data, axis=1)
+        return type(self)(
+            filtered,
+            dt=self.dt,
+            feature_labels=self.feature_labels,
+            trial_labels=self.trial_labels,
+        )
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        np.savez(
+            path,
+            data=self._data,
+            dt=np.array(self.dt),
+            feature_labels=np.array(self.feature_labels, dtype=object),
+            trial_labels=(
+                np.array(self.trial_labels, dtype=object)
+                if self.trial_labels is not None
+                else np.array([], dtype=object)
+            ),
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> Illustrator:
+        f = np.load(path, allow_pickle=True)
+        tl = f["trial_labels"]
+        return cls(
+            data=f["data"],
+            dt=float(f["dt"]),
+            feature_labels=list(f["feature_labels"]),
+            trial_labels=tl if tl.size > 0 else None,
+        )
+
+    def summary(self) -> pd.DataFrame:
+        flat = self._data.reshape(-1, self.n_features)
+        n_samp = flat.shape[0]
+        mean = flat.mean(axis=0)
+        std = flat.std(axis=0, ddof=1) if n_samp > 1 else flat.std(axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            snr = np.where(std > 0, np.abs(mean) / std, np.nan)
+            cv = np.where(np.abs(mean) > 0, std / np.abs(mean), np.nan)
+        df = pd.DataFrame(
+            {
+                "mean": mean,
+                "std": std,
+                "min": flat.min(axis=0),
+                "q25": np.percentile(flat, 25, axis=0),
+                "median": np.median(flat, axis=0),
+                "q75": np.percentile(flat, 75, axis=0),
+                "max": flat.max(axis=0),
+                "skew": skew(flat, axis=0),
+                "kurtosis": kurtosis(flat, axis=0),
+                "snr": snr,
+                "cv": cv,
+            },
+            index=pd.Index(self.feature_labels, name="feature"),
+        )
+        if self.n_trials > 1:
+            df["across_trial_std"] = self._data.mean(axis=1).std(axis=0, ddof=1)
+        return df
+
+    def summary_by_condition(self) -> pd.DataFrame:
+        if self.trial_labels is None:
+            raise ValueError("no trial labels were provided.")
+        frames = []
+        for cond in self.conditions:
+            sub = self.select(conditions=[cond])
+            s = sub.summary().assign(condition=cond)
+            frames.append(s)
+        out = pd.concat(frames).reset_index()
+        return out.set_index(["condition", "feature"])
+
+    def correlation_matrix(
+        self,
+        trial: int | None = None,
+        kind: str = "pooled",
+    ) -> pd.DataFrame:
+        if kind == "pooled":
+            mat = (
+                self._data.reshape(-1, self.n_features)
+                if trial is None
+                else self._data[trial]
+            )
+            corr = np.corrcoef(mat.T)
+        elif kind == "signal":
+            signal, _ = _signal_noise_decomp(self._data)
+            corr = np.corrcoef(signal.T)
+        elif kind == "noise":
+            _, noise = _signal_noise_decomp(self._data)
+            corr = np.corrcoef(noise.reshape(-1, self.n_features).T)
+        else:
+            raise ValueError(
+                f"unknown kind {kind!r}; choose 'pooled', 'signal', or 'noise'."
+            )
+        return pd.DataFrame(
+            corr, index=self.feature_labels, columns=self.feature_labels
+        )
+
+    def signal_noise_variance(self) -> pd.DataFrame:
+        if self.n_trials < 2:
+            raise ValueError("need at least 2 trials to estimate signal/noise.")
+        signal, noise = _signal_noise_decomp(self._data)
+        sig_var = signal.var(axis=0, ddof=1)
+        noise_var = noise.reshape(-1, self.n_features).var(axis=0, ddof=1)
+        total = sig_var + noise_var
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(total > 0, sig_var / total, np.nan)
+        return pd.DataFrame(
+            {
+                "signal_variance": sig_var,
+                "noise_variance": noise_var,
+                "signal_ratio": ratio,
+            },
+            index=pd.Index(self.feature_labels, name="feature"),
+        )
+
+    def mutual_information(self, n_neighbors: int = 3) -> pd.DataFrame:
+        flat = self._data.reshape(-1, self.n_features)
+        mi = np.zeros((self.n_features, self.n_features))
+        for i in range(self.n_features):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                mi[i] = mutual_info_regression(
+                    flat,
+                    flat[:, i],
+                    discrete_features=False,
+                    n_neighbors=n_neighbors,
+                )
+        mi = 0.5 * (mi + mi.T)
+        return pd.DataFrame(mi, index=self.feature_labels, columns=self.feature_labels)
+
+    def to_long_dataframe(self) -> pd.DataFrame:
+        r_idx, t_idx, f_idx = np.indices(self._data.shape)
+        df = pd.DataFrame(
+            {
+                "trial": r_idx.ravel(),
+                "time": self.time[t_idx.ravel()],
+                "feature": np.array(self.feature_labels)[f_idx.ravel()],
+                "value": self._data.ravel(),
+            }
+        )
+        if self.trial_labels is not None:
+            df["condition"] = np.asarray(self.trial_labels)[r_idx.ravel()]
+        return df
+
+    def pca(self, n_components: int | None = None) -> PCAResult:
+        n_max = min(self.n_features, self.n_time)
+        n = n_max if n_components is None else min(n_components, n_max)
+        centred = self.trial_mean - self.trial_mean.mean(axis=0, keepdims=True)
+        pca = PCA(n_components=n)
+        scores = pca.fit_transform(centred)
+        return PCAResult(
+            scores=scores,
+            components=pca.components_,
+            explained_variance=pca.explained_variance_,
+            explained_variance_ratio=pca.explained_variance_ratio_,
+            centre=self.trial_mean.mean(axis=0),
+            time=self.time,
+            feature_labels=list(self.feature_labels),
+        )
+
+    def autocorrelation(
+        self,
+        max_lag: int | None = None,
+    ) -> AutocorrelationResult:
+        max_lag = self.n_time // 2 if max_lag is None else max_lag
+        lags = np.arange(0, max_lag + 1) * self.dt
+        values = np.empty((self.n_features, max_lag + 1))
+        for ni in range(self.n_features):
+            acfs = np.empty((self.n_trials, max_lag + 1))
+            for t in range(self.n_trials):
+                x = self._data[t, :, ni] - self._data[t, :, ni].mean()
+                ac = np.correlate(x, x, mode="full")[self.n_time - 1 :]
+                denom = ac[0] if ac[0] != 0 else 1.0
+                acfs[t] = ac[: max_lag + 1] / denom
+            values[ni] = acfs.mean(axis=0)
+        return AutocorrelationResult(
+            lags=lags,
+            values=values,
+            feature_labels=list(self.feature_labels),
+            n_effective=self.n_time * self.n_trials,
+        )
+
+    def power_spectrum(
+        self,
+        nperseg: int | None = None,
+    ) -> PowerSpectrumResult:
+        fs = 1.0 / self.dt
+        nperseg = min(32, self.n_time) if nperseg is None else nperseg
+        freqs, _ = welch(self._data[0, :, 0], fs=fs, nperseg=nperseg)
+        psd = np.zeros((self.n_features, len(freqs)))
+        for t in range(self.n_trials):
+            for ni in range(self.n_features):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    _, p = welch(self._data[t, :, ni], fs=fs, nperseg=nperseg)
+                psd[ni] += p
+        psd /= self.n_trials
+        return PowerSpectrumResult(
+            frequencies=freqs,
+            psd=psd,
+            feature_labels=list(self.feature_labels),
+        )
+
+    def cross_correlation(
+        self,
+        max_lag: int | None = None,
+    ) -> CrossCorrelationResult:
+        max_lag = self.n_time // 4 if max_lag is None else max_lag
+        lags = np.arange(-max_lag, max_lag + 1) * self.dt
+        n = self.n_features
+        xcorr = np.zeros((n, n, 2 * max_lag + 1))
+        for t in range(self.n_trials):
+            centred = self._data[t] - self._data[t].mean(axis=0, keepdims=True)
+            norms = np.sqrt((centred**2).sum(axis=0))
+            for i in range(n):
+                for j in range(n):
+                    if norms[i] == 0 or norms[j] == 0:
+                        continue
+                    c = np.correlate(centred[:, i], centred[:, j], mode="full")
+                    centre = len(c) // 2
+                    xcorr[i, j] += c[centre - max_lag : centre + max_lag + 1] / (
+                        norms[i] * norms[j]
+                    )
+        xcorr /= self.n_trials
+        return CrossCorrelationResult(
+            lags=lags,
+            values=xcorr,
+            feature_labels=list(self.feature_labels),
+        )
+
+    def coherence(
+        self,
+        nperseg: int | None = None,
+    ) -> CoherenceResult:
+        fs = 1.0 / self.dt
+        nperseg = min(64, self.n_time) if nperseg is None else nperseg
+        freqs, _ = _coherence(
+            self._data[0, :, 0], self._data[0, :, 0], fs=fs, nperseg=nperseg
+        )
+        n = self.n_features
+        coh = np.zeros((n, n, len(freqs)))
+        for t in range(self.n_trials):
+            for i in range(n):
+                for j in range(i, n):
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        _, cxy = _coherence(
+                            self._data[t, :, i],
+                            self._data[t, :, j],
+                            fs=fs,
+                            nperseg=nperseg,
+                        )
+                    coh[i, j] += cxy
+                    if i != j:
+                        coh[j, i] += cxy
+        coh /= self.n_trials
+        return CoherenceResult(
+            frequencies=freqs,
+            coherence=coh,
+            feature_labels=list(self.feature_labels),
+        )
+
+    def spectrogram(
+        self,
+        nperseg: int | None = None,
+    ) -> SpectrogramResult:
+        fs = 1.0 / self.dt
+        nperseg = min(32, self.n_time // 4) if nperseg is None else nperseg
+        freqs, times, _ = spectrogram(self._data[0, :, 0], fs=fs, nperseg=nperseg)
+        power = np.zeros((self.n_features, len(freqs), len(times)))
+        for t in range(self.n_trials):
+            for ni in range(self.n_features):
+                _, _, sxx = spectrogram(self._data[t, :, ni], fs=fs, nperseg=nperseg)
+                power[ni] += sxx
+        power /= self.n_trials
+        return SpectrogramResult(
+            times=times,
+            frequencies=freqs,
+            power=power,
+            feature_labels=list(self.feature_labels),
+        )
+
+    def embed(
+        self,
+        method: str = "tsne",
+        source: str = "trial_mean",
+        n_components: int = 2,
+        **kwargs: Any,
+    ) -> EmbeddingResult:
+        if source == "trial_mean":
+            X = self.trial_mean
+            labels = None
+        elif source == "all_trials":
+            X = self._data.reshape(-1, self.n_features)
+            labels = (
+                np.repeat(self.trial_labels, self.n_time)
+                if self.trial_labels is not None
+                else None
+            )
+        else:
+            raise ValueError(
+                f"unknown source {source!r}; choose 'trial_mean' or 'all_trials'."
+            )
+
+        if method == "tsne":
+            kwargs.setdefault("init", "pca")
+            kwargs.setdefault("learning_rate", "auto")
+            kwargs.setdefault(
+                "perplexity",
+                min(30.0, max(5.0, X.shape[0] / 4)),
+            )
+            emb = TSNE(n_components=n_components, **kwargs).fit_transform(X)
+        elif method == "umap":
+            try:
+                import umap
+            except ImportError as e:
+                raise ImportError("UMAP requires the `umap-learn` package.") from e
+            emb = umap.UMAP(n_components=n_components, **kwargs).fit_transform(X)
+        else:
+            raise ValueError(f"unknown method {method!r}; choose 'tsne' or 'umap'.")
+
+        return EmbeddingResult(
+            embedding=emb,
+            method=method,
+            feature_labels=list(self.feature_labels),
+            point_labels=labels,
+        )
+
+    def plot_traces(
+        self,
+        trial: int = 0,
+        features: IndexLike = None,
+        ax: Axes | None = None,
+        show_population_mean: bool = False,
+        show_population_std: bool = False,
+        figsize: tuple[float, float] = (10, 4),
+    ) -> Axes:
+        feats = _resolve_indices(
+            features, self.n_features, self.feature_labels, "feature"
+        )
+        if not 0 <= trial < self.n_trials:
+            raise IndexError(f"trial {trial} out of range [0, {self.n_trials}).")
+        _, ax = _ensure_axes(ax, figsize)
+        for fi in feats:
+            ax.plot(
+                self.time,
+                self._data[trial, :, fi],
+                lw=1.5,
+                label=self.feature_labels[fi],
+            )
+        if show_population_mean:
+            ax.plot(
+                self.time,
+                self.population_mean[trial],
+                color="black",
+                lw=2.5,
+                label="Population mean",
+            )
+        if show_population_std:
+            ax.plot(
+                self.time,
+                self._data[trial, :, feats].std(axis=1),
+                color="red",
+                lw=2,
+                label="Population std",
+            )
+        return _finalize(ax, xlabel="Time", ylabel="Activity", title=f"Trial {trial}")
+
+    def plot_trial_average(
+        self,
+        features: IndexLike = None,
+        ax: Axes | None = None,
+        show_sem: bool = True,
+        figsize: tuple[float, float] = (10, 4),
+    ) -> Axes:
+        feats = _resolve_indices(
+            features, self.n_features, self.feature_labels, "feature"
+        )
+        _, ax = _ensure_axes(ax, figsize)
+        for fi in feats:
+            mean = self.trial_mean[:, fi]
+            (line,) = ax.plot(self.time, mean, lw=2, label=self.feature_labels[fi])
+            if show_sem and self.n_trials > 1:
+                sem = self.trial_sem[:, fi]
+                ax.fill_between(
+                    self.time,
+                    mean - sem,
+                    mean + sem,
+                    color=line.get_color(),
+                    alpha=0.3,
+                    linewidth=0,
+                )
+        sem_text = r" $\pm$ SEM" if show_sem and self.n_trials > 1 else ""
+        return _finalize(
+            ax,
+            xlabel="Time",
+            ylabel="Activity",
+            title=f"Trial-averaged activity{sem_text}",
+        )
+
+    def plot_condition_average(
+        self,
+        feature: int | str,
+        conditions: Sequence[Any] | None = None,
+        ax: Axes | None = None,
+        show_sem: bool = True,
+        figsize: tuple[float, float] = (10, 4),
+    ) -> Axes:
+        if self.trial_labels is None:
+            raise ValueError("no trial labels were provided.")
+        fi = _resolve_indices(feature, self.n_features, self.feature_labels, "feature")[
+            0
+        ]
+        conds = list(self.conditions) if conditions is None else list(conditions)
+        _, ax = _ensure_axes(ax, figsize)
+        for cond in conds:
+            idx = self._trial_idx_for(cond)
+            if len(idx) == 0:
+                continue
+            sub = self._data[idx, :, fi]
+            mean = sub.mean(axis=0)
+            (line,) = ax.plot(self.time, mean, lw=2, label=str(cond))
+            if show_sem and len(idx) > 1:
+                sem = sub.std(axis=0, ddof=1) / np.sqrt(len(idx))
+                ax.fill_between(
+                    self.time,
+                    mean - sem,
+                    mean + sem,
+                    color=line.get_color(),
+                    alpha=0.3,
+                    linewidth=0,
+                )
+        return _finalize(
+            ax,
+            xlabel="Time",
+            ylabel="Activity",
+            title=f"{self.feature_labels[fi]} by condition",
+        )
+
+    def plot_heatmap(
+        self,
+        trial: int | None = None,
+        ax: Axes | None = None,
+        cmap: str = "RdBu_r",
+        centre_zero: bool = True,
+        add_colorbar: bool = True,
+        figsize: tuple[float, float] = (10, 5),
+    ) -> Axes:
+        if trial is None:
+            mat = self.trial_mean.T
+            title = "Trial-averaged activity"
+        else:
+            if not 0 <= trial < self.n_trials:
+                raise IndexError(f"trial {trial} out of range [0, {self.n_trials}).")
+            mat = self._data[trial].T
+            title = f"Trial {trial}"
+        _, ax = _ensure_axes(ax, figsize)
+        norm = None
+        if centre_zero and np.any(mat):
+            vmax = float(np.abs(mat).max())
+            norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
         im = ax.imshow(
             mat,
             aspect="auto",
-            cmap="RdBu_r",
+            cmap=cmap,
             norm=norm,
-            extent=[self.time[0], self.time[-1], self.n_neurons - 0.5, -0.5],
+            extent=(self.time[0], self.time[-1], self.n_features - 0.5, -0.5),
         )
-        ax.set_yticks(range(self.n_neurons))
-        ax.set_yticklabels(self.neuron_labels, fontsize=7)
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Neuron")
-        ax.set_title(title)
-        fig.colorbar(im, ax=ax, label="Activity")
-        fig.tight_layout()
-        plt.show()
-        return fig
+        ax.set_yticks(range(self.n_features))
+        ax.set_yticklabels(self.feature_labels, fontsize=7)
+        if add_colorbar:
+            ax.figure.colorbar(im, ax=ax, label="Activity")
+        return _finalize(ax, xlabel="Time", ylabel="Feature", title=title, legend=False)
 
-    def plot_neuron_heatmap(self, trials=None, neurons=None, population_centred=True):
-        """Per-trial heatmap of neuron activity (Timepoints × Neurons).
-
-        :param trials: Trial indices to include. Defaults to all.
-        :type trials: list of int, optional
-        :param neurons: Neuron indices to include. Defaults to all.
-        :type neurons: list of int, optional
-        :param population_centred: If ``True`` (default), plot population-centred data.
-        :type population_centred: bool
-        :returns: The figure.
-        :rtype: matplotlib.figure.Figure
-        """
-        if trials is None:
-            trials = list(range(self.n_trials))
-        if neurons is None:
-            neurons = list(range(self.n_neurons))
-
-        fig, axes = plt.subplots(len(trials), 1, figsize=(10, 6 * len(trials)))
-        if len(trials) == 1:
-            axes = [axes]
-
-        for trial_index, trial in enumerate(trials):
-            subplot_title = (
-                f"Trial {trial + 1} (population-centred)"
-                if population_centred
-                else f"Trial {trial + 1}"
-            )
-            mat = (
-                self.population_centred_data[trial, :, :][:, neurons]
-                if population_centred
-                else self.data[trial, :, :][:, neurons]
-            )
-            sns.heatmap(mat.T, cmap="viridis", cbar=True, ax=axes[trial_index])
-            axes[trial_index].set_title(subplot_title)
-            axes[trial_index].set_xlabel("Timepoints")
-            axes[trial_index].set_ylabel("Neurons")
-
-        plt.tight_layout()
-        plt.show()
-        return fig
-
-    # ----------------------------------------------- inter-neuron correlation
     def plot_correlation(
-        self, trial: int = None, figsize: tuple = (6, 5)
-    ) -> plt.Figure:
-        """Plot the Pearson correlation matrix between neurons.
-
-        :param trial: If given, compute correlation from that trial only.
-            Otherwise uses all trials concatenated along the time axis.
-        :type trial: int, optional
-        :param figsize: Figure size as ``(width, height)``.
-        :type figsize: tuple
-        :returns: The figure.
-        :rtype: matplotlib.figure.Figure
-        """
-        if trial is None:
-            mat = self.data.reshape(-1, self.n_neurons)
-        else:
-            mat = self.data[trial]
-
-        corr = np.corrcoef(mat.T)
-
-        fig, ax = plt.subplots(figsize=figsize)
-        im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
-        ax.set_xticks(range(self.n_neurons))
-        ax.set_yticks(range(self.n_neurons))
-        ax.set_xticklabels(self.neuron_labels, rotation=90, fontsize=7)
-        ax.set_yticklabels(self.neuron_labels, fontsize=7)
-        ax.set_title(
-            "Inter-neuron correlation matrix"
-            + ("" if trial is None else f" (Trial {trial})")
-        )
-        fig.colorbar(im, ax=ax, label="Pearson r")
-        fig.tight_layout()
-        plt.show()
-        return fig
-
-    # ------------------------------------------------------- internal helpers
-    def _demean(self, mat: np.ndarray) -> np.ndarray:
-        """Remove the population mean at each timestep.
-
-        At every time-point t the mean activity across all neurons is subtracted::
-
-            mat_centred[t, :] = mat[t, :] - mean(mat[t, :])
-
-        This must be done before PCA so that the first principal component
-        reflects the dominant *pattern of differential activation* across
-        neurons, rather than simply the direction of the shared mean response
-        (which would otherwise capture the most variance by construction).
-
-        :param mat: Input matrix of shape ``(N_t, N_n)``.
-        :type mat: numpy.ndarray
-        :returns: Mean-subtracted matrix of shape ``(N_t, N_n)``.
-        :rtype: numpy.ndarray
-        """
-        return mat - mat.mean(axis=1, keepdims=True)
-
-    # ------------------------------------------------------- PCA trajectories
-    def plot_pca(self, n_components: int = 3, figsize: tuple = (12, 4)) -> plt.Figure:
-        """Plot the top principal components of the trial-averaged population activity.
-
-        The population mean across neurons is removed at each timestep before
-        fitting (see :meth:`_demean`), so that PCA captures differential structure
-        rather than the shared mean response.
-
-        :param n_components: Number of PCs to extract and display.
-        :type n_components: int
-        :param figsize: Figure size as ``(width, height)``.
-        :type figsize: tuple
-        :returns: The figure.
-        :rtype: matplotlib.figure.Figure
-        """
-        n_components = min(n_components, self.n_neurons, self.n_time)
-        centred = self._demean(self.trial_averaged_data)  # (N_t, N_n)
-        pca = PCA(n_components=n_components)
-        scores = pca.fit_transform(centred)  # (N_t, n_components)
-
-        fig = plt.figure(figsize=figsize)
-        gs = gridspec.GridSpec(1, 2, width_ratios=[2, 1])
-
-        # ── left: PC time courses ────────────────────────────────────────
-        ax_l = fig.add_subplot(gs[0])
-        for k in range(n_components):
-            ax_l.plot(
-                self.time,
-                scores[:, k],
-                color=_PALETTE[k % len(_PALETTE)],
-                lw=2,
-                label=f"PC{k + 1} ({pca.explained_variance_ratio_[k] * 100:.1f}%)",
-            )
-        ax_l.set_xlabel("Time")
-        ax_l.set_ylabel("PC score")
-        ax_l.set_title("PCA — top principal components over time")
-        ax_l.legend(fontsize=8)
-
-        # ── right: PC1 vs PC2 trajectory (coloured by time) ─────────────
-        ax_r = fig.add_subplot(gs[1])
-        y2 = scores[:, 1] if n_components > 1 else np.zeros(self.n_time)
-        sc = ax_r.scatter(scores[:, 0], y2, c=self.time, cmap="viridis", s=20, zorder=3)
-        ax_r.plot(scores[:, 0], y2, color="grey", lw=0.8, alpha=0.5)
-        ax_r.set_xlabel("PC1")
-        ax_r.set_ylabel("PC2")
-        ax_r.set_title("State-space trajectory (PC1 vs PC2)")
-        fig.colorbar(sc, ax=ax_r, label="Time")
-
-        fig.tight_layout()
-        plt.show()
-        return fig
-
-    # ------------------------------------------------------- variance explained
-    def plot_variance_explained(
-        self, n_components: int = None, figsize: tuple = (6, 4)
-    ) -> plt.Figure:
-        """Plot the fraction and cumulative variance explained by PCA.
-
-        Uses the trial-averaged data with the population mean removed at each
-        timepoint (see :meth:`_demean`).
-
-        :param n_components: Number of components to show.
-            Defaults to ``min(neurons, time)``.
-        :type n_components: int, optional
-        :param figsize: Figure size as ``(width, height)``.
-        :type figsize: tuple
-        :returns: The figure.
-        :rtype: matplotlib.figure.Figure
-        """
-        n_max = min(self.n_neurons, self.n_time)
-        if n_components is not None:
-            n_max = min(n_components, n_max)
-
-        centred = self._demean(self.trial_averaged_data)
-        pca = PCA(n_components=n_max)
-        pca.fit(centred)
-        ev = pca.explained_variance_ratio_
-        ks = np.arange(1, n_max + 1)
-
-        fig, ax1 = plt.subplots(figsize=figsize)
-        ax2 = ax1.twinx()
-
-        ax1.bar(ks, ev * 100, color=_PALETTE[0], alpha=0.7, label="Individual")
-        ax2.plot(
-            ks, np.cumsum(ev) * 100, "o-", color=_PALETTE[1], lw=2, label="Cumulative"
-        )
-        ax2.axhline(90, color="grey", ls="--", lw=1, label="90 % threshold")
-
-        ax1.set_xlabel("Principal component")
-        ax1.set_ylabel("Variance explained (%)", color=_PALETTE[0])
-        ax2.set_ylabel("Cumulative variance (%)", color=_PALETTE[1])
-        ax1.set_title("PCA — variance explained")
-
-        lines1, labs1 = ax1.get_legend_handles_labels()
-        lines2, labs2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labs1 + labs2, fontsize=8, loc="center right")
-
-        fig.tight_layout()
-        plt.show()
-        return fig
-
-    # ------------------------------------------------------- autocorrelation
-    def plot_autocorrelation(
         self,
-        neurons: list = None,
-        max_lag: int = None,
-        figsize: tuple = (10, 4),
-        return_max_lags: bool = True,
-    ):
-        """Plot the autocorrelation function (ACF) for selected neurons, averaged across trials.
+        kind: str = "pooled",
+        ax: Axes | None = None,
+        add_colorbar: bool = True,
+        figsize: tuple[float, float] = (6, 5),
+    ) -> Axes:
+        corr = self.correlation_matrix(kind=kind).to_numpy()
+        _, ax = _ensure_axes(ax, figsize)
+        im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
+        ax.set_xticks(range(self.n_features))
+        ax.set_yticks(range(self.n_features))
+        ax.set_xticklabels(self.feature_labels, rotation=90, fontsize=7)
+        ax.set_yticklabels(self.feature_labels, fontsize=7)
+        if add_colorbar:
+            ax.figure.colorbar(im, ax=ax, label="Pearson $r$")
+        return _finalize(ax, title=f"{kind.capitalize()} correlation", legend=False)
 
-        :param neurons: Neuron indices. Defaults to all.
-        :type neurons: list of int, optional
-        :param max_lag: Maximum lag to display in time-steps.
-            Defaults to ``N_t // 2``.
-        :type max_lag: int, optional
-        :param figsize: Figure size as ``(width, height)``.
-        :type figsize: tuple
-        :param return_max_lags: If ``True``, also return a dict mapping each
-            neuron label to the lag of its peak autocorrelation (excluding lag 0).
-        :type return_max_lags: bool
-        :returns: The figure, and — when *return_max_lags* is ``True`` — a dict
-            mapping each neuron label to its peak-autocorrelation lag in time units.
-        :rtype: matplotlib.figure.Figure or tuple(matplotlib.figure.Figure, dict)
-        """
-        neurons = list(range(self.n_neurons)) if neurons is None else neurons
-        max_lag = self.n_time // 2 if max_lag is None else max_lag
-        lags = np.arange(0, max_lag + 1) * self.dt
-
-        max_correlation_lags = {}
-
-        fig, ax = plt.subplots(figsize=figsize)
-        for k, ni in enumerate(neurons):
-            acfs = []
-            for t in range(self.n_trials):
-                x = self.data[t, :, ni] - self.data[t, :, ni].mean()
-                ac = np.correlate(x, x, mode="full")
-                ac = ac[len(ac) // 2 :]
-                ac = ac[: max_lag + 1] / ac[0]
-                acfs.append(ac)
-
-            mean_acf = np.mean(acfs, axis=0)
-
-            # Find the lag with maximum correlation (ignoring lag 0, since that is
-            # measuring correlation with itself at the same time, which mathematically
-            # is always 1.0)
-            if len(mean_acf) > 1:
-                best_lag_idx = np.argmax(mean_acf[1:]) + 1
-                max_correlation_lags[self.neuron_labels[ni]] = lags[best_lag_idx]
-            else:
-                max_correlation_lags[self.neuron_labels[ni]] = None
-
-            ax.plot(
-                lags,
-                mean_acf,
-                color=_PALETTE[k % len(_PALETTE)],
-                lw=2,
-                label=self.neuron_labels[ni],
+    def plot_distribution(
+        self,
+        features: IndexLike = None,
+        ax: Axes | None = None,
+        bins: int = 40,
+        figsize: tuple[float, float] = (8, 4),
+    ) -> Axes:
+        feats = _resolve_indices(
+            features, self.n_features, self.feature_labels, "feature"
+        )
+        _, ax = _ensure_axes(ax, figsize)
+        flat = self._data.reshape(-1, self.n_features)
+        for fi in feats:
+            ax.hist(
+                flat[:, fi],
+                bins=bins,
+                alpha=0.5,
+                label=self.feature_labels[fi],
+                density=True,
             )
+        return _finalize(
+            ax, xlabel="Value", ylabel="Density", title="Per-feature distributions"
+        )
 
-        ax.axhline(0, color="black", lw=0.8, ls="--")
-        ax.set_xticks(lags)
-        ax.grid(True, axis="x", linestyle="--", alpha=0.5)
-        ax.set_xlabel("Lag (time units)")
-        ax.set_ylabel("Autocorrelation")
-        ax.set_title("Autocorrelation function (trial-averaged)")
-        ax.legend(fontsize=7, ncol=4)
+    def plot_overview(
+        self,
+        figsize: tuple[float, float] = (15, 11),
+    ) -> Figure:
+        fig, axes = plt.subplots(3, 2, figsize=figsize)
+        self.plot_trial_average(ax=axes[0, 0])
+        self.plot_heatmap(ax=axes[0, 1])
+        self.plot_correlation(ax=axes[1, 0])
+        self.pca().plot_variance_explained(ax=axes[1, 1])
+        self.autocorrelation().plot(ax=axes[2, 0])
+        self.power_spectrum().plot(ax=axes[2, 1])
         fig.tight_layout()
-        plt.show()
-
-        if return_max_lags:
-            return fig, max_correlation_lags
         return fig
-
-    # ------------------------------------------------------- power spectrum
-    def plot_power_spectrum(
-        self, neurons: list = None, fs: float = None, figsize: tuple = (10, 4)
-    ) -> plt.Figure:
-        """Plot the power spectral density (Welch's method) for selected neurons, averaged across trials.
-
-        :param neurons: Neuron indices. Defaults to all.
-        :type neurons: list of int, optional
-        :param fs: Sampling frequency in Hz. Defaults to ``1/dt``.
-        :type fs: float, optional
-        :param figsize: Figure size as ``(width, height)``.
-        :type figsize: tuple
-        :returns: The figure.
-        :rtype: matplotlib.figure.Figure
-        """
-        neurons = list(range(self.n_neurons)) if neurons is None else neurons
-        fs = 1.0 / self.dt if fs is None else fs
-
-        fig, ax = plt.subplots(figsize=figsize)
-        for k, ni in enumerate(neurons):
-            psds = []
-            for t in range(self.n_trials):
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    f, psd = welch(
-                        self.data[t, :, ni], fs=fs, nperseg=min(32, self.n_time)
-                    )
-                psds.append(psd)
-            ax.semilogy(
-                f,
-                np.mean(psds, axis=0),
-                color=_PALETTE[k % len(_PALETTE)],
-                lw=2,
-                label=self.neuron_labels[ni],
-            )
-
-        ax.set_xlabel("Frequency")
-        ax.set_ylabel("Power spectral density (log scale)")
-        ax.set_title("Power spectra (Welch, trial-averaged)")
-        ax.legend(fontsize=7, ncol=4)
-        fig.tight_layout()
-        plt.show()
-        return fig
-
-    # -------------------------------------------------- convenience: all plots
-    def plot_all(self) -> None:
-        """Run every visualisation method in sequence — a one-stop overview."""
-        self.summary()
-        self.plot_neurons()
-        self.plot_mean_and_std()
-        self.plot_heatmap()
-        self.plot_neuron_heatmap()
-        self.plot_correlation()
-        self.plot_pca()
-        self.plot_variance_explained()
-        fig, max_lags = self.plot_autocorrelation(return_max_lags=True)
-        for neuron, best_lag in max_lags.items():
-            print(f"{neuron} peaks at a lag of {best_lag} time units.")
-        self.plot_power_spectrum()
