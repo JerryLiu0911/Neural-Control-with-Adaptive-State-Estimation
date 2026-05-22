@@ -7,13 +7,20 @@ from numpy.random import Generator
 from numpy.typing import NDArray
 
 
-class InputSignal:
-    """Immutable control input signal with numpy array protocol support.
+def _resolve_channels(m: int, channels: Optional[list[int]]) -> list[int]:
+    """Return selected channels, checking they are valid."""
+    if channels is None:
+        return list(range(m))
 
-    Represents a T-by-m array of control inputs (T timesteps, m channels).
-    Follows the numpy array protocol (__array__) for seamless interoperability
-    with functions expecting array-like inputs.
-    """
+    for ch in channels:
+        if ch < 0 or ch >= m:
+            raise ValueError(f"channel {ch} out of range [0, {m})")
+
+    return channels
+
+
+class InputSignal:
+    """Immutable control input signal with numpy array protocol support."""
 
     def __init__(
         self,
@@ -23,60 +30,72 @@ class InputSignal:
         pattern_name: Optional[str] = None,
         dtype: type = np.float64,
     ) -> None:
-        """Initialize an InputSignal.
-
-        :param T: Number of timesteps.
-        :param m: Number of input channels.
-        :param array: Control input array of shape (T, m).
-        :param pattern_name: Human-readable description of the pattern (e.g., 'pulse', 'composed').
-        :param dtype: NumPy dtype for the array.
-        :raises ValueError: If array shape does not match (T, m).
-        """
         array = np.asarray(array, dtype=dtype)
+
         if array.shape != (T, m):
             raise ValueError(
                 f"Array shape {array.shape} does not match expected shape ({T}, {m})"
             )
-        self._signal = array
+
+        self._signal = array.copy()
         self.T = T
         self.m = m
         self.pattern_name = pattern_name
         self.dtype = dtype
 
-    def __array__(self) -> NDArray:
-        """Return a copy of the signal array for numpy protocol."""
-        return self._signal.copy()
+    def __array__(self, dtype=None) -> NDArray:
+        arr = self._signal.copy()
+        if dtype is not None:
+            arr = arr.astype(dtype)
+        return arr
 
     @property
     def shape(self) -> tuple[int, int]:
-        """Return the shape of the signal array (T, m)."""
         return self._signal.shape
 
     def __getitem__(self, key):
-        """Support indexing like a NumPy array."""
         return self._signal[key]
 
     def __repr__(self) -> str:
-        """Return human-readable representation."""
         pattern = f", pattern='{self.pattern_name}'" if self.pattern_name else ""
         return f"InputSignal(T={self.T}, m={self.m}{pattern})"
 
     def to_array(self) -> NDArray:
-        """Return a copy of the underlying array.
-
-        :returns: Array of shape (T, m).
-        """
         return self._signal.copy()
+
+    def plot(self, ax=None, title: Optional[str] = None):
+        """Plot every input channel."""
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 3))
+
+        for ch in range(self.m):
+            ax.plot(self._signal[:, ch], label=f"input {ch}")
+
+        ax.set_xlabel("Timestep")
+        ax.set_ylabel("u(t)")
+        ax.set_title(title or self.pattern_name or "InputSignal")
+        ax.legend(frameon=False)
+        return ax
+
+    @classmethod
+    def from_array(
+        cls,
+        array: NDArray,
+        pattern_name: str = "custom",
+        dtype: type = np.float64,
+    ) -> InputSignal:
+        array = np.asarray(array, dtype=dtype)
+
+        if array.ndim != 2:
+            raise ValueError(f"array must be 2-D with shape (T, m), got {array.ndim}-D")
+
+        T, m = array.shape
+        return cls(T, m, array, pattern_name=pattern_name, dtype=dtype)
 
     @classmethod
     def zero(cls, T: int, m: int, dtype: type = np.float64) -> InputSignal:
-        """Create all-zero input signal.
-
-        :param T: Number of timesteps.
-        :param m: Number of input channels.
-        :param dtype: NumPy dtype.
-        :returns: InputSignal with all zeros.
-        """
         return cls(T, m, np.zeros((T, m), dtype=dtype), pattern_name="zero", dtype=dtype)
 
     @classmethod
@@ -86,19 +105,15 @@ class InputSignal:
         m: int,
         scale: float = 1.0,
         rng: Optional[Generator] = None,
+        channels: Optional[list[int]] = None,
         dtype: type = np.float64,
     ) -> InputSignal:
-        """Create IID Gaussian input signal.
-
-        :param T: Number of timesteps.
-        :param m: Number of input channels.
-        :param scale: Standard deviation of the Gaussian distribution.
-        :param rng: Optional seeded NumPy generator. Defaults to unseeded generator.
-        :param dtype: NumPy dtype.
-        :returns: InputSignal with Gaussian-distributed values.
-        """
         rng = rng or np.random.default_rng()
-        array = rng.normal(0.0, scale, (T, m)).astype(dtype)
+        cols = _resolve_channels(m, channels)
+
+        array = np.zeros((T, m), dtype=dtype)
+        array[:, cols] = rng.normal(0.0, scale, (T, len(cols))).astype(dtype)
+
         return cls(T, m, array, pattern_name="random_gaussian", dtype=dtype)
 
     @classmethod
@@ -112,29 +127,89 @@ class InputSignal:
         amplitude: float = 1.0,
         dtype: type = np.float64,
     ) -> InputSignal:
-        """Create rectangular pulse on selected input channels.
-
-        :param T: Number of timesteps.
-        :param m: Number of input channels.
-        :param onset: Timestep at which the pulse starts (0-indexed).
-        :param duration: Number of active timesteps.
-        :param channels: Which channels are active. Defaults to all channels.
-        :param amplitude: Value during the pulse.
-        :param dtype: NumPy dtype.
-        :returns: InputSignal with pulse pattern.
-        :raises ValueError: If onset or duration are invalid.
-        """
         if onset < 0 or onset >= T:
             raise ValueError(f"onset={onset} must be in range [0, {T})")
         if duration < 1:
             raise ValueError(f"duration={duration} must be at least 1")
         if onset + duration > T:
-            raise ValueError(f"Pulse extends beyond T: onset={onset}, duration={duration}, T={T}")
+            raise ValueError(
+                f"Pulse extends beyond T: onset={onset}, duration={duration}, T={T}"
+            )
 
+        cols = _resolve_channels(m, channels)
         array = np.zeros((T, m), dtype=dtype)
-        cols = channels if channels is not None else list(range(m))
         array[onset : onset + duration, cols] = amplitude
+
         return cls(T, m, array, pattern_name="pulse", dtype=dtype)
+
+    @classmethod
+    def impulse(
+        cls,
+        T: int,
+        m: int,
+        onset: int,
+        channels: Optional[list[int]] = None,
+        amplitude: float = 1.0,
+        dtype: type = np.float64,
+    ) -> InputSignal:
+        return cls.pulse(
+            T=T,
+            m=m,
+            onset=onset,
+            duration=1,
+            channels=channels,
+            amplitude=amplitude,
+            dtype=dtype,
+        )
+
+    @classmethod
+    def step(
+        cls,
+        T: int,
+        m: int,
+        onset: int = 0,
+        channels: Optional[list[int]] = None,
+        amplitude: float = 1.0,
+        dtype: type = np.float64,
+    ) -> InputSignal:
+        if onset < 0 or onset >= T:
+            raise ValueError(f"onset={onset} must be in range [0, {T})")
+
+        cols = _resolve_channels(m, channels)
+        array = np.zeros((T, m), dtype=dtype)
+        array[onset:, cols] = amplitude
+
+        return cls(T, m, array, pattern_name="step", dtype=dtype)
+
+    @classmethod
+    def pulse_train(
+        cls,
+        T: int,
+        m: int,
+        onset: int,
+        period: int,
+        duration: int = 1,
+        channels: Optional[list[int]] = None,
+        amplitude: float = 1.0,
+        dtype: type = np.float64,
+    ) -> InputSignal:
+        if onset < 0 or onset >= T:
+            raise ValueError(f"onset={onset} must be in range [0, {T})")
+        if period < 1:
+            raise ValueError(f"period={period} must be at least 1")
+        if duration < 1:
+            raise ValueError(f"duration={duration} must be at least 1")
+        if duration > period:
+            raise ValueError("duration should not exceed period for a pulse train")
+
+        cols = _resolve_channels(m, channels)
+        array = np.zeros((T, m), dtype=dtype)
+
+        for start in range(onset, T, period):
+            end = min(start + duration, T)
+            array[start:end, cols] = amplitude
+
+        return cls(T, m, array, pattern_name="pulse_train", dtype=dtype)
 
     @classmethod
     def oscillatory(
@@ -147,24 +222,38 @@ class InputSignal:
         channels: Optional[list[int]] = None,
         dtype: type = np.float64,
     ) -> InputSignal:
-        """Create sinusoidal input on selected channels.
+        cols = _resolve_channels(m, channels)
 
-        :param T: Number of timesteps.
-        :param m: Number of input channels.
-        :param frequency: Frequency in cycles per timestep (e.g., 0.05 gives 1 cycle per 20 steps).
-        :param amplitude: Peak amplitude.
-        :param phase: Initial phase offset in radians.
-        :param channels: Which channels to activate. Defaults to all channels.
-        :param dtype: NumPy dtype.
-        :returns: InputSignal with sinusoidal pattern.
-        """
         t = np.arange(T, dtype=dtype)
-        signal = amplitude * np.sin(2 * np.pi * frequency * t + phase).astype(dtype)
+        signal = amplitude * np.sin(2 * np.pi * frequency * t + phase)
 
         array = np.zeros((T, m), dtype=dtype)
-        cols = channels if channels is not None else list(range(m))
         array[:, cols] = signal[:, np.newaxis]
+
         return cls(T, m, array, pattern_name="oscillatory", dtype=dtype)
+
+    @classmethod
+    def chirp(
+        cls,
+        T: int,
+        m: int,
+        f0: float,
+        f1: float,
+        amplitude: float = 1.0,
+        phase: float = 0.0,
+        channels: Optional[list[int]] = None,
+        dtype: type = np.float64,
+    ) -> InputSignal:
+        cols = _resolve_channels(m, channels)
+
+        freqs = np.linspace(f0, f1, T, dtype=dtype)
+        phase_t = 2 * np.pi * np.cumsum(freqs) + phase
+        signal = amplitude * np.sin(phase_t)
+
+        array = np.zeros((T, m), dtype=dtype)
+        array[:, cols] = signal[:, np.newaxis]
+
+        return cls(T, m, array, pattern_name="chirp", dtype=dtype)
 
     @classmethod
     def single_channel(
@@ -175,22 +264,15 @@ class InputSignal:
         pattern: NDArray,
         dtype: type = np.float64,
     ) -> InputSignal:
-        """Apply a 1-D pattern to one input channel; all others are zero.
+        _resolve_channels(m, [channel])
 
-        :param T: Number of timesteps.
-        :param m: Number of input channels.
-        :param channel: Index of the channel to activate.
-        :param pattern: 1-D array of length T.
-        :param dtype: NumPy dtype.
-        :returns: InputSignal with pattern on specified channel.
-        :raises ValueError: If pattern length does not match T.
-        """
         pattern = np.asarray(pattern, dtype=dtype)
-        if len(pattern) != T:
-            raise ValueError(f"Pattern length {len(pattern)} does not match T={T}")
+        if pattern.shape != (T,):
+            raise ValueError(f"pattern must have shape ({T},), got {pattern.shape}")
 
         array = np.zeros((T, m), dtype=dtype)
         array[:, channel] = pattern
+
         return cls(T, m, array, pattern_name="single_channel", dtype=dtype)
 
     @classmethod
@@ -203,134 +285,34 @@ class InputSignal:
         end: float = 1.0,
         dtype: type = np.float64,
     ) -> InputSignal:
-        """Create linearly ramping input on one channel, all others zero.
+        _resolve_channels(m, [channel])
 
-        :param T: Number of timesteps.
-        :param m: Number of input channels.
-        :param channel: Index of the channel to activate.
-        :param start: Value at t=0.
-        :param end: Value at t=T-1.
-        :param dtype: NumPy dtype.
-        :returns: InputSignal with ramp pattern.
-        """
         array = np.zeros((T, m), dtype=dtype)
         array[:, channel] = np.linspace(start, end, T, dtype=dtype)
+
         return cls(T, m, array, pattern_name="ramp", dtype=dtype)
 
 
 class InputBuilder:
-    """Fluent interface for composing multiple input patterns.
-
-    Enables method chaining to combine different patterns on different channels.
-    Call build() to produce an immutable InputSignal.
-
-    Example:
-        u = (InputBuilder(T=120, m=3)
-             .pulse(onset=30, duration=2, channels=[0], amplitude=1.0)
-             .oscillatory(frequency=0.05, channels=[1, 2])
-             .build())
-    """
+    """Fluent interface for composing multiple input patterns."""
 
     def __init__(self, T: int, m: int, dtype: type = np.float64) -> None:
-        """Initialize a builder.
-
-        :param T: Number of timesteps.
-        :param m: Number of input channels.
-        :param dtype: NumPy dtype for the composed signal.
-        """
         self.T = T
         self.m = m
         self.dtype = dtype
         self._signal = np.zeros((T, m), dtype=dtype)
 
+    def _add(self, signal: InputSignal) -> InputBuilder:
+        """Add an InputSignal into the builder."""
+        if signal.shape != (self.T, self.m):
+            raise ValueError(
+                f"signal shape {signal.shape} does not match builder shape {(self.T, self.m)}"
+            )
+
+        self._signal += signal.to_array()
+        return self
+
     def zero(self) -> InputBuilder:
-        """Add zero pattern (no-op, array is already initialized to zero).
-
-        :returns: Self for method chaining.
-        """
-        return self
-
-    def pulse(
-        self,
-        onset: int,
-        duration: int = 1,
-        channels: Optional[list[int]] = None,
-        amplitude: float = 1.0,
-    ) -> InputBuilder:
-        """Superimpose a rectangular pulse on selected channels.
-
-        :param onset: Timestep at which the pulse starts (0-indexed).
-        :param duration: Number of active timesteps.
-        :param channels: Which channels to activate. Defaults to all channels.
-        :param amplitude: Value during the pulse.
-        :returns: Self for method chaining.
-        :raises ValueError: If onset or duration are invalid.
-        """
-        if onset < 0 or onset >= self.T:
-            raise ValueError(f"onset={onset} must be in range [0, {self.T})")
-        if duration < 1:
-            raise ValueError(f"duration={duration} must be at least 1")
-        if onset + duration > self.T:
-            raise ValueError(f"Pulse extends beyond T: onset={onset}, duration={duration}, T={self.T}")
-
-        cols = channels if channels is not None else list(range(self.m))
-        self._signal[onset : onset + duration, cols] += amplitude
-        return self
-
-    def oscillatory(
-        self,
-        frequency: float,
-        channels: Optional[list[int]] = None,
-        amplitude: float = 1.0,
-        phase: float = 0.0,
-    ) -> InputBuilder:
-        """Superimpose a sinusoidal pattern on selected channels.
-
-        :param frequency: Frequency in cycles per timestep.
-        :param channels: Which channels to activate. Defaults to all channels.
-        :param amplitude: Peak amplitude.
-        :param phase: Initial phase offset in radians.
-        :returns: Self for method chaining.
-        """
-        t = np.arange(self.T, dtype=self.dtype)
-        signal = amplitude * np.sin(2 * np.pi * frequency * t + phase).astype(self.dtype)
-        cols = channels if channels is not None else list(range(self.m))
-        self._signal[:, cols] += signal[:, np.newaxis]
-        return self
-
-    def single_channel(
-        self,
-        channel: int,
-        pattern: NDArray,
-    ) -> InputBuilder:
-        """Superimpose a 1-D pattern on one channel.
-
-        :param channel: Index of the channel.
-        :param pattern: 1-D array of length T.
-        :returns: Self for method chaining.
-        :raises ValueError: If pattern length does not match T.
-        """
-        pattern = np.asarray(pattern, dtype=self.dtype)
-        if len(pattern) != self.T:
-            raise ValueError(f"Pattern length {len(pattern)} does not match T={self.T}")
-        self._signal[:, channel] += pattern
-        return self
-
-    def ramp(
-        self,
-        channel: int,
-        start: float = 0.0,
-        end: float = 1.0,
-    ) -> InputBuilder:
-        """Superimpose a linear ramp on one channel.
-
-        :param channel: Index of the channel.
-        :param start: Value at t=0.
-        :param end: Value at t=T-1.
-        :returns: Self for method chaining.
-        """
-        ramp_values = np.linspace(start, end, self.T, dtype=self.dtype)
-        self._signal[:, channel] += ramp_values
         return self
 
     def random_gaussian(
@@ -339,24 +321,164 @@ class InputBuilder:
         scale: float = 1.0,
         rng: Optional[Generator] = None,
     ) -> InputBuilder:
-        """Superimpose Gaussian noise on selected channels.
+        return self._add(
+            InputSignal.random_gaussian(
+                T=self.T,
+                m=self.m,
+                scale=scale,
+                rng=rng,
+                channels=channels,
+                dtype=self.dtype,
+            )
+        )
 
-        :param channels: Which channels to affect. Defaults to all channels.
-        :param scale: Standard deviation.
-        :param rng: Optional seeded generator.
-        :returns: Self for method chaining.
-        """
-        rng = rng or np.random.default_rng()
-        cols = channels if channels is not None else list(range(self.m))
-        noise = rng.normal(0.0, scale, (self.T, len(cols))).astype(self.dtype)
-        self._signal[:, cols] += noise
-        return self
+    def pulse(
+        self,
+        onset: int,
+        duration: int = 1,
+        channels: Optional[list[int]] = None,
+        amplitude: float = 1.0,
+    ) -> InputBuilder:
+        return self._add(
+            InputSignal.pulse(
+                T=self.T,
+                m=self.m,
+                onset=onset,
+                duration=duration,
+                channels=channels,
+                amplitude=amplitude,
+                dtype=self.dtype,
+            )
+        )
+
+    def impulse(
+        self,
+        onset: int,
+        channels: Optional[list[int]] = None,
+        amplitude: float = 1.0,
+    ) -> InputBuilder:
+        return self._add(
+            InputSignal.impulse(
+                T=self.T,
+                m=self.m,
+                onset=onset,
+                channels=channels,
+                amplitude=amplitude,
+                dtype=self.dtype,
+            )
+        )
+
+    def step(
+        self,
+        onset: int = 0,
+        channels: Optional[list[int]] = None,
+        amplitude: float = 1.0,
+    ) -> InputBuilder:
+        return self._add(
+            InputSignal.step(
+                T=self.T,
+                m=self.m,
+                onset=onset,
+                channels=channels,
+                amplitude=amplitude,
+                dtype=self.dtype,
+            )
+        )
+
+    def pulse_train(
+        self,
+        onset: int,
+        period: int,
+        duration: int = 1,
+        channels: Optional[list[int]] = None,
+        amplitude: float = 1.0,
+    ) -> InputBuilder:
+        return self._add(
+            InputSignal.pulse_train(
+                T=self.T,
+                m=self.m,
+                onset=onset,
+                period=period,
+                duration=duration,
+                channels=channels,
+                amplitude=amplitude,
+                dtype=self.dtype,
+            )
+        )
+
+    def oscillatory(
+        self,
+        frequency: float,
+        channels: Optional[list[int]] = None,
+        amplitude: float = 1.0,
+        phase: float = 0.0,
+    ) -> InputBuilder:
+        return self._add(
+            InputSignal.oscillatory(
+                T=self.T,
+                m=self.m,
+                frequency=frequency,
+                amplitude=amplitude,
+                phase=phase,
+                channels=channels,
+                dtype=self.dtype,
+            )
+        )
+
+    def chirp(
+        self,
+        f0: float,
+        f1: float,
+        amplitude: float = 1.0,
+        phase: float = 0.0,
+        channels: Optional[list[int]] = None,
+    ) -> InputBuilder:
+        return self._add(
+            InputSignal.chirp(
+                T=self.T,
+                m=self.m,
+                f0=f0,
+                f1=f1,
+                amplitude=amplitude,
+                phase=phase,
+                channels=channels,
+                dtype=self.dtype,
+            )
+        )
+
+    def single_channel(
+        self,
+        channel: int,
+        pattern: NDArray,
+    ) -> InputBuilder:
+        return self._add(
+            InputSignal.single_channel(
+                T=self.T,
+                m=self.m,
+                channel=channel,
+                pattern=pattern,
+                dtype=self.dtype,
+            )
+        )
+
+    def ramp(
+        self,
+        channel: int,
+        start: float = 0.0,
+        end: float = 1.0,
+    ) -> InputBuilder:
+        return self._add(
+            InputSignal.ramp(
+                T=self.T,
+                m=self.m,
+                channel=channel,
+                start=start,
+                end=end,
+                dtype=self.dtype,
+            )
+        )
 
     def build(self) -> InputSignal:
-        """Create the final immutable InputSignal from composed patterns.
-
-        :returns: InputSignal with superimposed patterns.
-        """
         return InputSignal(
             T=self.T,
             m=self.m,

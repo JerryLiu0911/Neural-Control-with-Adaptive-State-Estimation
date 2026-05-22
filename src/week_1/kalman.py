@@ -171,3 +171,78 @@ class KalmanFilter:
                 x = self.A @ x + self.B @ control_inputs[t]
 
         return KalmanResult(states, covariances, gains, innovations)
+    
+    def smooth_rts(
+        self,
+        observations: NDArray,
+        control_inputs: NDArray,
+        initial_state: NDArray,
+        initial_covariance: NDArray | None = None,
+    ) -> KalmanResult:
+        """
+        Run Kalman filter forward, then RTS smoother backward.
+
+        Filter gives x_hat[t|t]: estimate using observations up to time t.
+        Smoother gives x_hat[t|T]: estimate using all observations 0...T-1.
+        """
+        T = observations.shape[0]
+        n, m = self.state_dim, self.obs_dim
+
+        if initial_covariance is None:
+            initial_covariance = self.Q.copy()
+
+        # Storage for forward pass
+        x_filt = np.zeros((T, n))
+        P_filt = np.zeros((T, n, n))
+        x_pred = np.zeros((T, n))
+        P_pred = np.zeros((T, n, n))
+        gains = np.zeros((T, n, m))
+        innovations = np.zeros((T, m))
+
+        I = np.eye(n)
+        x = initial_state.copy()
+        P = initial_covariance.copy()
+
+        # forward Kalman filter
+        for t in range(T):
+            x_pred[t] = x
+            P_pred[t] = P
+
+            S = self.C @ P @ self.C.T + self.R
+            K = P @ self.C.T @ np.linalg.inv(S)
+            inn = observations[t] - self.C @ x
+
+            x = x + K @ inn
+            P = (I - K @ self.C) @ P
+            P = (P + P.T) / 2
+
+            x_filt[t] = x
+            P_filt[t] = P
+            gains[t] = K
+            innovations[t] = inn
+
+            if t < T - 1:
+                x = self.A @ x + self.B @ control_inputs[t]
+                P = self.A @ P @ self.A.T + self.Q
+                P = (P + P.T) / 2
+
+        # Backward RTS smoother
+        x_smooth = x_filt.copy()
+        P_smooth = P_filt.copy()
+
+        for t in range(T - 2, -1, -1):
+            # Smoother gain
+            J = P_filt[t] @ self.A.T @ np.linalg.inv(P_pred[t + 1])
+
+            # Correct filtered estimate using future-smoothed estimate
+            x_smooth[t] = x_filt[t] + J @ (
+                x_smooth[t + 1] - x_pred[t + 1]
+            )
+
+            P_smooth[t] = P_filt[t] + J @ (
+                P_smooth[t + 1] - P_pred[t + 1]
+            ) @ J.T
+            P_smooth[t] = (P_smooth[t] + P_smooth[t].T) / 2
+
+        return KalmanResult(x_smooth, P_smooth, gains, innovations)
+    
