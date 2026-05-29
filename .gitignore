@@ -64,6 +64,9 @@ desktop.ini
 # Logs
 *.log
 
+#report
+report/
+
 # Sphinx
 docs/build/
 docs/source/_autosummary/
