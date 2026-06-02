@@ -22,20 +22,6 @@ def _warm_start(Y, n):
     C_init : (p, n) initial observation map
     A_init : (n, n) initial state transition matrix (diagonal)
     '''
-    # from l4b.dataset import Dataset
-    # from l4b.stats.pca import PCA
-    # from l4b.stats.autocorrelation import Autocorrelation
-
-    # Y_centered = Y - Y.mean(0, keepdims=True)  # zero-centre for PCA
-    # ds = Dataset(observations=Y_centered[np.newaxis])
-    # pca = PCA(ds, n_components=n)
-    # C_init = pca.result.components.T
-    # scores = pca.result.scores
-    # X = scores[:-1]
-    # Yt = scores[1:]
-    # A_init = np.linalg.lstsq(X, Yt, rcond=None)[0].T 
-
-
 
     #In case the imports don't work : 
     T, p = Y.shape
@@ -123,6 +109,7 @@ def _assemble(A, B, C, D, Q, R, F, Sigma_u):
 
 def _fit_once(Y, n, m, F, Sigma_u, seed, C_init, A_init):
     T, p = Y.shape
+    print(p, n, m)
     na = n + m
     rng = np.random.default_rng(seed)
     perturb = 0.05 * seed                                  # 0 for seed 0
