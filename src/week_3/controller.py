@@ -29,8 +29,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
-from week_2.Jerry_liu_yhl63 import _kalman_filter, _rts_smoother, _assemble, _fit_once, identify_model, select_latent_dim
-
 
 import numpy as np
 from scipy.linalg import solve_discrete_are
@@ -431,55 +429,6 @@ class Controller:
         return u
 
 
-# =========================================================================== #
-#  Drop-in stand-in for GG4.Brain (offline testing without the wheel)
-# =========================================================================== #
-class BrainLike:
-    """Mimics the ``GG4.Brain`` interface with a random stable LG-SSM.
-
-    Same surface as the real brain: ``input_dim``, ``measure()``,
-    ``next_state(u=None)``, ``current_time_stamp``, inputs clipped to [0, 1],
-    hidden state never exposed.
-    """
-
-    def __init__(self, random_seed: int = 0, n_latent: int = 6,
-                 n_obs: int = 16, n_input: int = 2,
-                 spectral_radius: float = 0.9,
-                 obs_disturbance: float = 0.0):
-        rng = np.random.default_rng(random_seed)
-        # random stable A with the requested spectral radius
-        M = rng.standard_normal((n_latent, n_latent))
-        M = 0.5 * (M - M.T) + 0.1 * rng.standard_normal((n_latent, n_latent))
-        ev = np.max(np.abs(np.linalg.eigvals(M)))
-        self._A = spectral_radius * M / (ev + 1e-9)
-        self._B = rng.standard_normal((n_latent, n_input)) / np.sqrt(n_latent)
-        self._C = rng.standard_normal((n_obs, n_latent))
-        self._Q = 0.01 * np.eye(n_latent)
-        self._R = 0.04 * np.eye(n_obs)
-        self._rng = rng
-        self.input_dim = n_input
-        self._n_obs = n_obs
-        self._x = rng.standard_normal(n_latent)
-        # unmodelled constant measurement offset (e.g. electrode baseline drift)
-        self._bias = obs_disturbance * rng.standard_normal(n_obs)
-        self.current_time_stamp = 0
-
-    def measure(self):
-        v = self._rng.multivariate_normal(np.zeros(self._n_obs), self._R)
-        return (self._C @ self._x + self._bias + v).tolist()
-
-    def next_state(self, u=None):
-        if u is None:
-            u = np.zeros(self.input_dim)
-        u = np.clip(np.asarray(u, float), _INPUT_LO, _INPUT_HI)
-        w = self._rng.multivariate_normal(np.zeros(self._A.shape[0]), self._Q)
-        self._x = self._A @ self._x + self._B @ u + w
-        self.current_time_stamp += 1
-
-
-# =========================================================================== #
-#  Experiment drivers
-# =========================================================================== #
 def probe_inputs(T: int, m: int, seed: int = 0, hold: int = 3,
                  lo: float = 0.0, hi: float = 1.0) -> np.ndarray:
     """Bounded piecewise-constant random probe in [lo, hi] (a PRBS-like signal
