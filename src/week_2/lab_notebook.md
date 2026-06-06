@@ -104,3 +104,10 @@ Two principled extensions address the AR(1) limitation and would be natural dire
 ## 5.4 Deployment
 
 All hyperparameters — the iteration cap, restart count, convergence tolerance, and the form of the input prior — are fixed in code before submission. The input-prior scale $\Sigma_u$ is set deterministically from the supplied observation increments; this is a fixed rule, not a quantity tuned at test time. The function receives a single observation array, performs identification on it by the constrained EM of §5.2, and then performs augmented RTS smoothing under the identified parameters. The leading $n$ smoothed coordinates are returned as the state estimate and the trailing $m$ as the input estimate, with shapes $(T,n)$ and $(T,m)$ respectively. The smoothing pass is linear-Gaussian and deterministic; the cost and the local-optimum risk are confined to the identification stage, whose iteration cap and restart count are chosen so that the call completes well within the evaluation window.
+
+
+
+
+
+
+

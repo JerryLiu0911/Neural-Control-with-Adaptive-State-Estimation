@@ -137,13 +137,100 @@ def _rts_smoother(A, xf, Pf, xp, Pp):
 
 #  System identification (improved from Week 2 code)
 
-def _warm_start(Y, n):
+def _stabilize(A, rho_max=0.98):
+    """Reflect any unstable modes back inside the unit circle (warm start only).
+
+    The raw subspace realisation is not guaranteed stable; a wildly unstable A
+    can blow up the first EM E-step, so we cap the spectral radius. This only
+    seeds EM, which then refines A freely.
+    """
+    try:
+        w, V = np.linalg.eig(A)
+        mag = np.abs(w)
+        if np.any(mag > rho_max):
+            w = np.where(mag > rho_max, w / mag * rho_max, w)
+            A = np.real(V @ np.diag(w) @ np.linalg.inv(V))
+    except np.linalg.LinAlgError:
+        pass                                          # defective A: leave as-is
+    return A
+
+
+def _ls_B_x0(U, Y, A, C):
+    """Least-squares (B, x0) given (A, C) and the known input-output data.
+
+    The output is linear in (x0, vec(B)): simulate the response to each basis
+    parameter (unit x0 directions with B=0, then unit B entries with x0=0) to
+    build the design matrix, and regress the observations onto it.
+    """
+    T, p = Y.shape
+    n, m = A.shape[0], U.shape[1]
+
+    def sim_output(x0, B):
+        x = x0.copy(); out = np.empty((T, p))
+        for t in range(T):
+            out[t] = C @ x
+            x = A @ x + B @ U[t]
+        return out.reshape(-1)
+
+    cols = [sim_output(np.eye(n)[j], np.zeros((n, m))) for j in range(n)]
+    for r in range(n):
+        for c in range(m):
+            Bb = np.zeros((n, m)); Bb[r, c] = 1.0
+            cols.append(sim_output(np.zeros(n), Bb))
+    Phi = np.stack(cols, axis=1)                      # (T*p, n + n*m)
+    theta, *_ = np.linalg.lstsq(Phi, Y.reshape(-1), rcond=None)
+    return theta[n:].reshape(n, m), theta[:n]         # B, x0
+
+
+def _warm_start(U, Y, n):
+    """Input-aware subspace (MOESP) warm start returning (C, A, B, x0).
+
+    Future output and input block-Hankel matrices are formed; the future-input
+    row space is projected out of the future outputs (so the deterministic input
+    response is removed), and the column space of the residual is the extended
+    observability matrix -> (C, A) via shift-invariance. With (A, C) fixed,
+    (B, x0) follow from a linear least-squares against the known data. Valid for
+    n > p, and seeds a real B (unlike the output-only / random start).
+    """
+    U = np.asarray(U, float); Y = np.asarray(Y, float)
+    T, p = Y.shape
+    m = U.shape[1]
+    i = max(2, int(np.ceil((n + p) / p)) + 1)         # block rows; (i-1)*p >= n
+    N = T - i + 1                                      # columns (time index)
+
+    Yf = np.empty((i * p, N)); Uf = np.empty((i * m, N))
+    for r in range(i):
+        Yf[r * p:(r + 1) * p] = Y[r:r + N].T          # future output block-Hankel
+        Uf[r * m:(r + 1) * m] = U[r:r + N].T          # future input  block-Hankel
+
+    # project the future-input row space out of the future outputs (MOESP)
+    coef = np.linalg.lstsq(Uf.T, Yf.T, rcond=None)[0]  # Uf^T coef ~ Yf^T
+    Yf_perp = Yf - (Uf.T @ coef).T                     # (i*p, N)
+
+    # column space of the residual = extended observability matrix [C; CA; ...]
+    Ug, _, _ = np.linalg.svd(Yf_perp, full_matrices=False)
+    O = Ug[:, :n]                                      # (i*p, n)
+    C = O[:p]                                          # first block row -> (p, n)
+    A = np.linalg.lstsq(O[:-p], O[p:], rcond=None)[0]  # shift-invariance
+    A = _stabilize(A)
+
+    B, x0 = _ls_B_x0(U, Y, A, C)
+    return C, A, B, x0
+
+
+def _warm_start_pca(Y, n, m, seed=0):
+    """Baseline warm start (pre-improvement): C, A from PCA of the outputs and a
+    *random* B. Ignores the inputs and is only valid for n <= p. Kept for the
+    before/after comparison against the input-aware subspace start.
+    """
     mu = Y.mean(0, keepdims=True)
     _, _, Vt = np.linalg.svd(Y - mu, full_matrices=False)
-    C = Vt[:n].T
-    X = (Y - mu) @ C
+    C = Vt[:n].T                                       # leading PCA directions
+    X = (Y - mu) @ C                                   # crude state proxy
     A = np.linalg.lstsq(X[:-1], X[1:], rcond=None)[0].T
-    return C, A
+    B = 0.01 * np.random.default_rng(seed).standard_normal((n, m))
+    x0 = np.zeros(n)
+    return C, A, B, x0
 
 
 def identify_model(
@@ -153,6 +240,7 @@ def identify_model(
     *,
     iters: int = _EM_ITERS,
     tol: float = _EM_TOL,
+    warm_start: str = "subspace",
     verbose: bool = False,
 ) -> Tuple[LinearModel, np.ndarray]:
     """Identify ``(A, B, C, Q, R)`` from a probing run with known inputs.
@@ -172,11 +260,15 @@ def identify_model(
     T, p = Y.shape
     m = U.shape[1]
 
-    C, A = _warm_start(Y, n)
-    B = 0.01 * np.random.default_rng(0).standard_normal((n, m))
+    if warm_start == "subspace":
+        C, A, B, x0 = _warm_start(U, Y, n)
+    elif warm_start == "pca":
+        C, A, B, x0 = _warm_start_pca(Y, n, m)
+    else:
+        raise ValueError(f"unknown warm_start {warm_start!r}")
     Q = 0.1 * np.eye(n)
     R = 0.1 * np.eye(p)
-    x0 = np.zeros(n); P0 = np.eye(n)
+    P0 = np.eye(n)
 
     ll_trace = []
     prev = -np.inf
@@ -244,6 +336,36 @@ def select_latent_dim(
         model, ll = identify_model(U, Y, n, **kw)
         out.append((n, float(ll[-1]), model))
     return out
+
+
+def subspace_singular_values(U: np.ndarray, Y: np.ndarray,
+                             horizon: int = 10) -> np.ndarray:
+    """Singular-value spectrum of the input-projected output block-Hankel.
+
+    These are exactly the singular values whose leading vectors the subspace
+    warm start (`_warm_start`) keeps as the observability subspace. A gap in
+    the spectrum marks the system order (number of latent variables): the
+    singular values above the gap are state modes, those below are noise. With
+    measurement noise the gap is usually *soft*, so it is a guide rather than a
+    hard cut-off — corroborate it with the closed-loop performance-vs-n sweep.
+
+    Parameters
+    ----------
+    U, Y : (T, m) / (T, p) probing inputs and recorded observations.
+    horizon : number of block rows i; the spectrum can resolve up to i*p modes.
+    """
+    U = np.asarray(U, float); Y = np.asarray(Y, float)
+    T, p = Y.shape
+    m = U.shape[1]
+    i = max(2, int(horizon))
+    N = T - i + 1
+    Yf = np.empty((i * p, N)); Uf = np.empty((i * m, N))
+    for r in range(i):
+        Yf[r * p:(r + 1) * p] = Y[r:r + N].T
+        Uf[r * m:(r + 1) * m] = U[r:r + N].T
+    coef = np.linalg.lstsq(Uf.T, Yf.T, rcond=None)[0]   # project inputs out
+    Yf_perp = Yf - (Uf.T @ coef).T
+    return np.linalg.svd(Yf_perp, compute_uv=False)
 
 
 # =========================================================================== #
