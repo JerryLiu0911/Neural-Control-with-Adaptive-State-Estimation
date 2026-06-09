@@ -74,6 +74,17 @@ class LinearModel:
         I = np.eye(self.n)
         return self.C @ np.linalg.solve(I - self.A, self.B)
 
+    def frequency_response(self, freqs) -> np.ndarray:
+        """FRF ``G(e^{jw}) = C (e^{jw} I - A)^{-1} B`` at normalised frequencies
+        ``freqs`` (cycles/sample). Returns complex array ``(len(freqs), p, m)``."""
+        I = np.eye(self.n)
+        freqs = np.atleast_1d(freqs)
+        G = np.empty((freqs.size, self.p, self.m), complex)
+        for i, f in enumerate(freqs):
+            z = np.exp(2j * np.pi * f)
+            G[i] = self.C @ np.linalg.solve(z * I - self.A, self.B)
+        return G
+
     def controllability_rank(self) -> int:
         blocks = [self.B]
         for _ in range(self.n - 1):
@@ -335,6 +346,34 @@ def select_latent_dim(
     for n in candidates:
         model, ll = identify_model(U, Y, n, **kw)
         out.append((n, float(ll[-1]), model))
+    return out
+
+
+def cross_val_latent_dim(U_tr, Y_tr, U_val, Y_val, candidates, **kw) -> list:
+    """Select the latent dimension by held-out predictive score (cross-validation).
+
+    Each candidate ``n`` is fit on the training probe and scored on an
+    *independent* validation probe (different seed) by two held-out measures:
+    the Kalman marginal log-likelihood per sample and the free-run VAF. Unlike
+    the in-sample log-likelihood (which is monotone in ``n`` and shows no elbow),
+    the held-out score stops improving once ``n`` reaches the true order, so its
+    knee/peak is a principled, overfitting-aware choice.
+
+    Returns a list of ``(n, train_ll_per_sample, val_ll_per_sample, val_vaf,
+    model)``.
+    """
+    out = []
+    for n in candidates:
+        model, tr = identify_model(U_tr, Y_tr, n, **kw)
+        xf, _, _, _, ll = _kalman_filter(Y_val, U_val, model.A, model.B, model.C,
+                                         model.Q, model.R, np.zeros(n), np.eye(n))
+        x = xf[0].copy(); Yh = np.empty_like(Y_val)        # free-run prediction
+        for t in range(len(Y_val)):
+            Yh[t] = model.C @ x
+            x = model.A @ x + model.B @ U_val[t]
+        vaf = 1.0 - np.var(Y_val - Yh) / np.var(Y_val)
+        out.append((n, float(tr[-1] / len(Y_tr)), float(ll / len(Y_val)),
+                    float(vaf), model))
     return out
 
 
