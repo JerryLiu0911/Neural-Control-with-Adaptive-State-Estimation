@@ -322,6 +322,140 @@ The clear directions for improvement follow from these causes: **sequential per-
 phases** (give each joint the full input budget in turn) to relieve (2); a short
 **online elbow-amplitude self-calibration** to relieve (1) per brain; **input-
 direction (FRF) design** to extract more elbow `x1` per unit input; and a
-**graded-stop / anti-overshoot** rule to relieve (3). The neural-observer variant
-(§5.3) is the natural next study, turning the V1–V2 gap into a quantitative result on
-the value of feedback.
+**graded-stop / anti-overshoot** rule to relieve (3).
+
+---
+
+## 8. Robustness, generalisation and parameter sensitivity
+
+The Week-4 brief asks explicitly for robustness under system variation, parameter
+perturbation, and noise. We address each on the real plant.
+
+**Generalisation across brains (system variation).** The controller is calibrated
+once on a single probe brain, but every trial is a *different* random brain. Running
+V1 across five seeds on a common target set gives a final-distance **median of
+10.2 cm with 93 % of trials inside 15 cm**. The controller therefore generalises:
+this is the empirical payoff of the brain-invariance argument of §2 — the parts the
+controller relies on (the muscle frequencies and the joint map) do not change with
+the brain, and the part that does change (per-brain gain) is absorbed by the closed
+loop rather than re-identified.
+
+**Sensitivity to the controller's own parameters.** Sweeping each knob about its
+default (mean final distance over a fixed target set, cm):
+
+| knob | sweep → result | reading |
+|---|---|---|
+| `bias` | 0.45→4.3, 0.50→10.7, 0.55→7.8, 0.60→6.7 | moderate; lower bias frees input budget |
+| `elbow_boost` | 1.3→10.2, 1.7→10.7, 2.2→6.5, 2.6→**2.8** | **most impactful; higher is better** |
+| `tol` (deadzone) | 0.03→10.0, 0.05→10.7, 0.08→11.2 | nearly flat — robust |
+
+The dominant single-seed sensitivity is `elbow_boost`, and on the calibration brain
+(seed 0) accuracy improves as it is raised, apparently confirming the
+elbow-under-actuation diagnosis (§7) and suggesting a larger boost as a free win.
+**Cross-seed validation overturns this**, and the reversal is instructive. Repeating
+the comparison across five brains:
+
+| `elbow_boost` | 1.7 | 2.0 | 2.2 | 2.6 |
+|---|---|---|---|---|
+| within 15 cm (5 seeds) | **90 %** | 85 % | 70 % | 65 % |
+
+a larger boost does *not* generalise — reliability *falls* as it is raised, because
+over-driving the elbow on brains where it is already adequate induces overshoot,
+even though the single seed-0 number improves. The default of 1.7 is therefore the
+robust choice, and the apparent seed-0 gain was over-fitting to one brain. This is a
+methodological result in its own right: on a stochastic, per-brain-varying plant,
+**single-brain tuning is actively misleading**, and parameters must be chosen by
+cross-seed reliability rather than best-case error. The principled fix for the weak
+elbow is consequently a *per-trial* self-calibration, not a larger fixed gain. The
+near-flat `tol` response, by contrast, shows the loop is genuinely insensitive to
+where the deadzone sits.
+
+**Measurement noise.** The plant is already extremely noisy by construction (single-
+sample `measure()` ≈ 2.6; §2), and V1 copes with it via feedback, so noise robustness
+is exercised implicitly on every trial. The GG4 `Brain` exposes no separate
+noise-magnitude parameter, so a controlled noise-injection sweep is not available from
+the official interface; the honest statement is that the design is *built around* a
+high-noise regime rather than tested against a tunable one.
+
+**Value of feedback (V1 vs V2).** The two versions share the entire servo and differ
+only in the joint estimate (§5.3), so their gap isolates the worth of the hand
+measurement. On the same seeds and targets, **V1 reaches a median 10.2 cm (93 %
+< 15 cm) while V2 reaches 33.7 cm (0 % < 15 cm)**. V2 runs correctly but drifts: the
+forward observer is exact in principle, but it is fed the single noisy `measure()`
+(≈ 2.6) whereas the arm responds to the 100-sample average (≈ 0.25), and the
+nonlinear head amplifies that ~10× noise mismatch into accumulating joint-angle error.
+The ~24 cm gap is therefore a concrete measurement of how much direct hand sensing is
+worth in this BMI, and a vindication of closing the loop on the hand whenever it is
+available.
+
+---
+
+## 9. Comparison of control strategies
+
+The brief's first task is to compare approaches along four axes — *estimation method,
+control strategy, design assumptions, evaluation criteria*. We compare at three
+levels: the model-based strategies we considered and rejected, the two feedback
+variants of the chosen controller, and the contrast with the group's time-domain
+approach.
+
+### 9.1 Against the model-based alternatives
+
+§3 rejected LQG, feed-forward Fourier inversion, and MPC; framed as a comparison:
+
+| axis | LQG / LQR | Feed-forward Fourier inversion | (Nonlinear) MPC | **Select-tone servo (ours)** |
+|---|---|---|---|---|
+| estimation | Kalman state of the *brain* | brain FRF (open loop) | full nonlinear model | none online (V1) / forward observer (V2) |
+| control of | linear latent → *static* setpoint | reachable latent *trajectory* | hand, in principle | hand, via IK joint velocity |
+| crosses the nonlinearity? | no | no | yes, but non-convex | **yes (exploits the head's structure)** |
+| handles `[0,1]` limit | clip after | clip after | native | native (sub-clip amplitudes) |
+| closes loop on hand | no (hand not in state) | no | yes (needs model) | **yes** |
+
+The decisive differentiators are the last two rows: only a strategy that closes on
+the *hand* and respects the input limit can work, and only ours does so without a
+full nonlinear plant model — by *using* the head's frequency-addressing rather than
+inverting it. LQG and pure feed-forward fail a hard requirement (no hand feedback /
+no nonlinearity crossing); MPC could succeed but at the cost of a non-convex solve
+over an unknown stochastic stack.
+
+### 9.2 Feedback modality: V1 vs V2
+
+Same control law, two estimators (§8): a *measurement-corrected* hand estimate (V1)
+versus a *prediction-only* forward observer (V2) — precisely the Kalman
+predict-plus-update versus predict-only distinction from the estimation weeks. V1's
+10 cm vs V2's 34 cm is the quantitative trade: V2 needs no hand sensor and is the
+honest choice if the hand were unobservable, but pays heavily for the missing
+correction under this plant's noise.
+
+### 9.3 Frequency-domain servo vs time-domain primitive FSM (group)
+
+Within the group, the sharpest contrast is between this controller and the
+**primitive-based finite-state-machine** controller. Both rest on the *same*
+discovery — that the BMI exposes four rhythmic muscle primitives (shoulder±, elbow±)
+— but they differ in how the primitives are *driven and sequenced*:
+
+| axis | Frequency-domain select-tone servo (ours) | Time-domain primitive FSM |
+|---|---|---|
+| primitive drive | continuous sinusoid; **amplitude ∝ error** | discrete **bursts** of a fixed rhythm |
+| sequencing | both joints simultaneously (budget-shared) | FSM: alternating coarse bursts → fine repair → hold |
+| stopping | deadzone → tone off → stiction | predictive early-stop + sticky hold |
+| state used | IK joint error from hand position | inferred joint position + hand-space Jacobian |
+| main strength | smooth, simple, proportional; generalises across brains | explicit supervision, coast exploitation, guards |
+| shared failure | **min effective stimulation > fine correction → overshoot** | same overshoot wall |
+
+The instructive result is that two *structurally different* controllers — one
+continuous and frequency-domain, one discrete and event-driven — converge on the
+**same precision limit**: the smallest stimulation that reliably moves a joint is
+larger than the final correction needed, so both reach the target region and then
+struggle to stop. This is strong evidence that the wall is a property of the *plant*
+(the head's power ramp/exit asymmetry and stiction granularity), not of either
+control law, and it is the most important cross-approach lesson: future gains likely
+require sub-primitive actuation (graded micro-bursts, or amplitude annealing on
+approach) rather than a different high-level controller.
+
+### 9.4 Evaluation criteria
+
+All approaches are compared under the *same* standardised harness (`template.ipynb`):
+the identical polar target grid, brain seed, horizon, and the six metrics of §6, so
+differences reflect the controllers rather than the test conditions — satisfying the
+brief's standardisation requirement and making the cross-approach numbers
+commensurable.
