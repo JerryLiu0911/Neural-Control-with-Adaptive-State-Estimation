@@ -132,6 +132,98 @@ not reliably identifiable from a probe of this length, and retain $n{=}6$ as
 the operating order --- trading predictive parsimony for the controllability
 margin the downstream LQR/LQI design relies on.
 
+
+\section{Initial control: setpoint LQG/LQI, and why it changes}
+\label{sec:lqg}
+Prior to recieving the BMI, our first controllers were based on setpoint regulation using standard model-based methods.
+ Setpoint regulation picks a
+feasible target $u^\star=G^{+}y^\star$, $x^\star=(I-A)^{-1}Bu^\star$ ($G$ is
+$16\!\times\!2$, so $y^\star$ is met only in least squares) and applies the steady-state
+LQG law
+\[
+u_t = u^\star - K(\hat x_t - x^\star),
+\]
+with $K$ the infinite-horizon LQR gain (control DARE) and $\hat x$ from a steady-state
+Kalman filter (estimator DARE) that re-anchors the state each step from the innovation
+$y-C\hat x$. The feedforward $u^\star$ is responsible for holding the setpoint,
+without it the law reduces to $-K\hat x$, which vanishes at zero error. However, it is still
+not offset-free as $u^\star$ uses our model's DC gain, so model mismatch would still leave a residual error.
+\textbf{LQI} removes it with a pure integral servo $u_t=-K_x\hat x_t-K_i\xi_t$ that integrates the
+measured tracked-output error, $\xi_{t+1}=\xi_t+(Hy_t-z^\star)$, driving it to
+zero at DC (with anti-windup under the $[0,1]$ clip) at the cost of a slower approach.
+
+Under-actuation ($m = 2$ inputs, $p = 16$ outputs) restricts the steady-state reachable 
+set to $\mathrm{im}\,G$ ($\mathrm{rank} \le 2$), making an arbitrary 16-D output target is 
+unattainable and can only be resolved via its least-squares projection $u^\star = G^{+}y^\star$. 
+Tracking therefore requires compressing the control target into a lower-dimensional variable 
+$z = Wy$ ($\dim \le m$). Unknown to us at the time of implementing this controller, this dimensional reduction is inherently handled by the 
+downstream architecture, the 16 plant outputs feed directly into an affine decoder designed 
+to isolate the two latent rhythms, making $z = (x_1, x_2)$ the definitive tracked variable. 
+By routing the high-dimensional plant through this downstream decoder, the end-to-end latent 
+transfer function collapses into a square $2 \times 2$ map:$$H_z(e^{j\omega}) = WC(e^{j\omega}I - A)^{-1}B$$B
+ecause this map is square, it is trivial to invert—effectively bypassing the non-square under-actuation of the 
+physical plant and providing the core operator utilized by the frequency-based framework in the next section.
+
+\section{System identification and why it struggles}
+\label{sec:sysid}
+We empirically measured the brain's frequency response using a periodic multisine 
+(averaging periods to estimate free noise) and compared it to the identified model 
+(Fig.~\ref{fig:frf}). Three structural findings shape our control design:
+
+\textbf{1. Model fidelity is restricted to the dominant direction at low frequencies.} With $m{=}2$ inputs, 
+the response has two principal gains, $\sigma_1$ and $\sigma_2$. The dominant gain $\sigma_1$ 
+matches well at low frequencies. However, $\sigma_2$ is under-represented by the model almost everywhere, and the relative reconstruction 
+error climbs toward $1$ at high frequencies where the brain transmits little signal.
+
+\textbf{2. A coherence ceiling reveals unmodeled nonlinearity.} Input–output coherence never approaches 
+$1$, even at peak SNR. This fixed ceiling is the classic fingerprint of a nonlinear stack: 
+a specific fraction of the output is not linearly explainable, and no increase in latent 
+dimension removes it. While period-averaging lifts the SNR-limited deficit at high frequencies, 
+the low-frequency coherence ceiling remains structural and intractable.
+
+\textbf{3. The surrogate is strictly a best-linear-approximation.} Because complex exponentials 
+are the eigenfunctions of an LTI map, the transfer function $H(e^{j\omega}) = C(e^{j\omega}I - A)^{-1}B$ 
+is invariant to internal coordinate transformations ($x \to Tx$). Internal coordinates are never uniquely 
+identifiable, but $H$ is. Therefore, the EM-fitted model and the model-free empirical transfer function 
+should coincide; where they do not (Fig.~\ref{fig:frf}), the gap is model error rather than an 
+artefact of coordinates. Against a nonlinear plant, this gauge-invariant matching simply extracts the 
+best linear approximation at the probed amplitude.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{brain_frf.png}
+\caption{Empirical (black/grey) vs.\ identified-model (red/blue) principal gains
+(left) and relative reconstruction error (right). $\sigma_1$ is captured at low
+frequency; $\sigma_2$ is badly under-modelled and the error grows with frequency,
+where coherence collapses --- the regime the controller must avoid.}
+\label{fig:frf}
+\end{figure}
+
+\section{The brain is a first-order low-pass system}
+\label{sec:lowpass}
+Across all seeds, the identified state matrix $A$ is dominated by a single pole pair at 
+$|\lambda| \approx 0.93$--$0.95$. Fitting the principal gain $\sigma_1(f)$ to a first-order 
+low-pass filter $|k/(1-a e^{-j\omega})|$ yields an exceptional fit ($a=0.940$, $R^2=0.998$; 
+Fig.~\ref{fig:lp}), revealing a -3 dB cutoff near $f_c \approx 0.012$ cyc/sample followed 
+by a steep $23\times$ roll-off. This physical limitation dictates our downstream performance, which will be referenced in 
+the controller's dominant failure mode in \S\ref{sec:results}.
+% Because the BMI's required muscle selection frequencies ($0.073, 0.133, 0.207, 0.312$ cyc/sample; 
+% \S\ref{sec:final}) all lie well above $f_c$, they sit deep in the attenuation band. 
+% Consequently, every muscle must be driven through severe gain roll-off, with higher-frequency 
+% muscles requiring exponentially more input effort to breach the activation threshold. 
+% This single structural property—the severe high-frequency attenuation of the inner 
+% channel—predicts the controller's dominant failure mode (\S\ref{sec:results}) 
+% before a control law is even deployed.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.74\linewidth]{lowpass_fit.png}
+\caption{The identified brain's dominant gain $\sigma_1(f)$ (markers) against a
+first-order low-pass fit (red, $R^2{=}0.998$, pole $0.94$). The muscle frequencies sit
+far above the $-3$dB cutoff, on the roll-off.}
+\label{fig:lp}
+\end{figure}
+
 \section{The BMI structure forces a frequency-domain view}
 \label{sec:bmi}
 Inspecting the interface reframed our approach. The decoder taking the 16-D
@@ -148,184 +240,60 @@ selection, to move the hand, $x_1$ must oscillate, leading to the interpretation
 that the natural language for the inner control problem is the brain's frequency response. This is what
 turned the investigation from time-domain regulation toward frequency
 matching.
-\section{System identification and why it struggles}
-\label{sec:sysid}
-We measured the brain's frequency response empirically with a periodic multisine
-(averaging periods for a free noise estimate) and compared it to the identified model
-(Fig.~\ref{fig:frf}). Three findings shape the controller.
-
-\textbf{(i) The model is faithful only in a low band and one direction.} With $m{=}2$
-the response has two principal gains $\sigma_1,\sigma_2$. The dominant $\sigma_1$
-matches at low frequency, but $\sigma_2$ --- the second channel of controllable
-authority --- is under-represented by the model almost everywhere, and the relative
-reconstruction error climbs toward $1$ at high frequency where the brain transmits
-little. \textbf{(ii) A coherence ceiling reveals nonlinearity.} Input--output
-coherence never approaches $1$ even at best SNR: a fixed fraction of the output is not
-\emph{linearly} explainable, the fingerprint of the nonlinear stack, and no increase in
-latent dimension removes it (averaging lifts the high-frequency, SNR-limited deficit
-but not the low-frequency ceiling). \textbf{(iii) The model is a linearisation.}
-Matching frequency responses identifies the system precisely because complex
-exponentials are the eigenfunctions of an LTI map and $H(z)$ is the
-similarity-invariant object; against a \emph{nonlinear} plant it returns the best
-linear approximation at the probed amplitude --- which is exactly what a linear
-controller sees, and is adequate only where coherence is high. These are honest
-limitations: our linear surrogate is a low-frequency, dominant-direction approximation,
-and the controller is designed to live within that band.
-
-That frequency matching identifies the plant at all rests on one fact: complex
-exponentials are the eigenfunctions of an LTI map, so
-$Y(e^{j\omega})=H(e^{j\omega})U(e^{j\omega})$ and $H$ on the unit circle \emph{is} the
-input--output map (its inverse transform is the impulse response). It is also the
-\emph{right} object because, under the gauge $x\!\to\!Tx$, the transforms cancel in
-$C(zI-A)^{-1}B$: internal coordinates are never identifiable, but $H$ is. So the
-EM-fitted model and the model-free empirical transfer function \emph{should} coincide,
-and where they do not (Fig.~\ref{fig:frf}) the gap is genuine model error rather than
-an artefact of coordinates --- which is why the FRF is the diagnostic we trust.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=0.92\linewidth]{brain_frf.png}
-\caption{Empirical (black/grey) vs.\ identified-model (red/blue) principal gains
-(left) and relative reconstruction error (right). $\sigma_1$ is captured at low
-frequency; $\sigma_2$ is badly under-modelled and the error grows with frequency,
-where coherence collapses --- the regime the controller must avoid.}
-\label{fig:frf}
-\end{figure}
-
-\section{The brain is a first-order low-pass system}
-\label{sec:lowpass}
-Across seeds the identified $A$ has a \emph{single dominant mode}: a pole pair at
-$|\lambda|\!\approx\!0.93$--$0.95$ with all other eigenvalues much smaller. Fitting the
-dominant gain $\sigma_1(f)$ to a first-order low-pass $|k/(1-a e^{-j\omega})|$ gives
-$a=0.940$ and $R^2=0.998$ (Fig.~\ref{fig:lp}), a $23\times$ roll-off with a $-3$dB
-cutoff near $f_c\!\approx\!0.012$\,cyc/sample. \emph{The brain is, to excellent
-approximation, a first-order low-pass filter} in its dominant input--output direction.
-This \emph{confirms, with inputs, what the blind phase already suggested}: in
-Weeks~1--2, before any input could be commanded, the observation power spectrum was
-low-frequency-dominated with no narrow-band peaks --- the signature, noted then, of a
-stable low-order LG-SSM driven by white noise --- and PCA placed a low ceiling on the
-observation rank. The active multisine sharpens that qualitative reading into a
-quantitative first-order roll-off, so the two phases are consistent and the low-pass
-character is not an artefact of probing.
-
-This is the pivot of the whole design, for two reasons. First, \emph{linearity in the
-inner channel} ($u\!\to\!z$, since the decoder is affine) means the latent response to
-a tone is exactly the frequency response at that tone --- we can synthesise the
-oscillations the muscle head demands by \emph{frequency matching}, in open loop.
-Second, the muscle selection/power frequencies ($0.073,0.133,0.207,0.312$\,cyc/sample,
-\S\ref{sec:final}) all lie \emph{well above} $f_c$, on the roll-off; so every muscle is
-driven through attenuation, and the higher-frequency muscles progressively more so.
-This single mechanism predicts the controller's dominant failure (\S\ref{sec:results})
-before any controller is built.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=0.74\linewidth]{lowpass_fit.png}
-\caption{The identified brain's dominant gain $\sigma_1(f)$ (markers) against a
-first-order low-pass fit (red, $R^2{=}0.998$, pole $0.94$). The muscle frequencies sit
-far above the $-3$dB cutoff, on the roll-off.}
-\label{fig:lp}
-\end{figure}
-
-\section{Initial control: setpoint LQG/LQI, and why it changes}
-\label{sec:lqg}
-Our first controllers were the standard model-based ones, built on the identified
-plant. Setpoint regulation chooses a feasible target $u^\star=G^{+}y^\star$,
-$x^\star=(I-A)^{-1}Bu^\star$ ($G$ is $16\!\times\!2$, so $y^\star$ is met only in
-least squares), and applies the \emph{steady-state} LQG law
-\[
-u_t = u^\star - K(\hat x_t - x^\star),
-\]
-with $K$ from the control algebraic Riccati equation and $\hat x$ from a Kalman filter
-(LQG = LQR + estimator by the separation principle; the two ``$Q,R$'' --- cost weights
-versus EM noise covariances --- are distinct). The feedforward $u^\star$ is essential:
-dropping it drives $u\!\to\!0$ at steady state and the setpoint is not held; a residual
-offset remains because $u^\star$ uses the \emph{model's} gain, which \textbf{LQI}
-removes by integral action on the tracked output. The Kalman correction makes this a
-\emph{next-step-prediction} scheme: the estimator re-anchors the state each step from
-the innovation $y-C\hat x$.
-
-Under-actuation shapes what any such law can do. With $m{=}2$ inputs and $p{=}16$
-outputs the steady-state reachable set is $\mathrm{im}\,G$ (rank $\le 2$), so an
-arbitrary $16$-D output is unattainable and a target is met only in its least-squares
-projection $u^\star=G^{+}y^\star$. The natural controlled variable is therefore a
-\emph{tracked output} $z=Wy$ of dimension $\le m$ --- and the affine decoder makes the
-meaningful choice $z=(x_1,x_2)$, the two latent rhythms, available for free. The latent
-transfer function $H_z(e^{j\omega})=WC(e^{j\omega}I-A)^{-1}B$ is then a $2{\times}2$
-map, trivial to invert --- the object the frequency synthesis of the next section uses.
-
-Two corrections to our initial reasoning matter. The LQR horizon is \emph{not} the
-experiment length: $K$ is the infinite-horizon steady-state gain (the algebraic Riccati
-solution), legitimate because a stabilising loop's time-varying gain converges to it.
-And minimising $\sum (x-x^\star)^\top Q(x-x^\star)+u^\top R u$ regulates toward a
-\emph{constant} $x^\star$; to instead \emph{track an oscillation} the cost gains a
-reference-carrying term and the optimal law becomes
-$u_t=u^\star_t-K(x_t-x^\star_t)$, whose feedforward $u^\star_t$ for a single tone is
-exactly the frequency-response inverse $U=H_z(e^{j\omega})^{+}Z$ --- the Riccati
-recursion is unchanged (so the problem stays well-posed and convex), only the linear
-costate term moves. In other words, LQ-tracking of a sinusoid \emph{is} frequency
-matching.
-
-The decisive issue is structural, not implementational: every setpoint scheme holds
-the latents \emph{constant}, which (\S\ref{sec:bmi}) yields \emph{zero} muscle
-activation. Setpoint LQG/LQI is the right tool for ``hold the latents at a level'' and
-the wrong tool for ``make them a rhythm.'' This is what pushed us from regulation to
-the frequency-domain approach.
 
 \section{The final controller: frequency-multiplexed joint servo}
 \label{sec:final}
-The brain being a stable, linear, low-pass system lets us replace the inner regulation
-problem with open-loop \emph{frequency synthesis}, and --- the key simplification ---
-lets the only feedback live at the outer, position level.
+Our approximation of the brain being a stable, linear, low-pass system lets us replace the inner regulation
+problem with open-loop frequency synthesis, letting the only feedback live at the outer, position level, 
+significantly simplifying our design.
 
-\textbf{Why steady-state responses suffice (no constant neural observation).}
-The brain's dominant pole $0.94$ gives a transient time constant of
-$\tau\!\approx\!1/(1-0.94)\!\approx\!17$ steps and a settling time of a few $\tau$
-($\sim$50 steps), \emph{far} shorter than the control horizon ($T{=}1000$) and the
-$\sim$tens-of-steps cadence of a hand correction. So after a brief transient the latent
-oscillation is at its \emph{steady state}, fully described by the frequency response;
-we need only place the right spectral content and read the \emph{slow} consequence (the
-hand), never the fast neural transient. This is precisely what licenses a single
-\emph{outer} loop on the measurable hand position and an open-loop inner synthesis: the
-outer loop, operating slower than the inner transients, launders the inner loop's model
-error and stabilises the velocity$\to$position integrator.
+\textbf{Small transients allow us to bypass continuous neural observation.} The brain's dominant pole ($0.94$) yields a transient time constant of $\tau \approx 17$ steps 
+and a settling time of $\sim$50 steps, far shorter than the $T=1000$ control horizon and the 
+tens-of-steps cadence of hand corrections. Following this brief initial transient, the 
+latent oscillations reach a steady state fully characterized by the frequency response. 
+This allows the controller to inject the required spectral content open-loop, ignoring 
+the fast neural transients entirely.
 
-\textbf{Inner synthesis: a ladder to ``free power''.} The inner loop was built in three
-stages, each fixing the previous one's failure --- the same constructive style as the
-estimation ladder of \S\ref{sec:est}. \emph{(i) Naive two-tone.} Drive $x_1$ with a
-select tone (to choose the muscle) and $x_2$ with a slow power tone (to power it). This
-fails: the select tone, transported into both latents, contaminates $x_2$, which dips
-through the wake threshold, and because the head's power exits fast but re-enters
-slowly, each dip collapses power into a single ``fire-once'' slew that cannot be
-retriggered. \emph{(ii) Input-direction nulling.} Use the two channels to drive $x_1$
-while \emph{nulling} $x_2$ at the select frequency (a $2{\times}2$ solve on $H_z$). The
-nulling itself is well conditioned, but the scheme still needs a \emph{centred} $x_2$
-oscillation, and centring its large offset consumes the $[0,1]$ headroom, so the select
-tone clips --- and clipping re-introduces the very contamination it removed.
-\emph{(iii) Free power (final).} A glass-box replica of the head (matching the supplied
-network to $3{\times}10^{-7}$) revealed that $x_2$'s natural DC offset
-($\approx{+}1.8$) already exceeds the wake threshold, so a \emph{constant-high} $x_2$
-sustains power indefinitely. We therefore drop the power tone and the centring entirely
-and emit only a small select tone --- kept small enough that its leakage never dips
-$x_2$ below threshold and the input never clips, yet large enough that $x_1$ clears the
-selector threshold. The obstacle that sank stage (ii) becomes the feature that powers
-the controller.
+
+The frequency synthesis loop was built in three stages : 
+
+
+\textbf{1. Naive two-tone baseline:} Initial exploration assumed symmetric dynamics, driving $x_1$ with 
+a high-frequency select tone to activate the downstream band-pass filters, and $x_2$ with a slow power 
+tone to modulate muscle activation magnitude. This architecture failed due to inner-channel cross-talk: 
+the select tone leaked into both latents, causing $x_2$ to transiently dip below its critical activation 
+threshold. Because the muscle head recovers power slowly after a threshold violation, these dips collapsed 
+continuous actuation into a single, un-retriggerable "fire-once" transient.
+
+
+\textbf{2. Input-direction nulling:} To decouple the channels, we inverted the $2 \times 2$ transfer function 
+matrix $H_z$ to actively null the select frequency leakage along the $x_2$ coordinate. While mathematically 
+well-conditioned, this AC-power strategy required centering the $x_2$ oscillation. Shifting the state to 
+center this trajectory consumed the strict $[0,1]$ input headroom, causing severe control signal saturation. 
+This clipping reintroduced the exact harmonic distortion and cross-talk the nulling matrix was designed to eliminate.
+
+\textbf{3. Inherent DC exploitation (Final):} Direct inspection of the decoder network's weights and biases resolved 
+this bottleneck by revealing a fundamental structural asymmetry: $x_2$ operates 
+purely as a magnitude-dependent power throttle, and its natural resting DC offset ($\approx +1.8$) already sits 
+securely above the muscle activation threshold. Consequently, oscillating $x_2$ is not only unnecessary but 
+counterproductive. By abandoning the active power tone entirely, we compress the control problem to a single 
+dimension: emitting a small select tone on $x_1$. This tone is large enough to breach the selection threshold, 
+yet small enough that its residual leakage never drives $x_2$ below its resting threshold, avoiding input 
+saturation entirely and turning a structural constraint into a control asset.
 
 \textbf{Outer servo.} Muscles $0/1$ drive the shoulder and $2/3$ the elbow, and each
 joint's velocity depends only on its own pair, so control decouples into two
 independent inverse-kinematics joint servos. Using the known arm geometry (link
-lengths --- physics, not the network weights), the target and current hand positions
-are inverted to joint angles; each joint error emits a select tone of
-amplitude $a=\mathrm{clip}(k|e|,a_{\min},a_{\max})$ (elbow boosted, total capped to
-share the budget), and inside a deadzone the tones drop and stiction holds the pose.
-The four select frequencies and the joint map are \emph{brain-invariant} and calibrated
-once offline (Fig.~\ref{fig:cal}); the per-brain gain that varies is absorbed by the
-loop. Two variants differ only in the joint estimate: \textbf{V1} reads it from the
-measured hand by inverse kinematics; \textbf{V2} runs a forward observer (the known
-fixed downstream replayed on the neural) with \emph{no} hand feedback --- a Kalman
-predict-plus-update versus predict-only contrast.
+lengths etc.), we uniquely resolve the multi-pose ambiguity in current-pose-estimation by strictly tracking the continuous, 
+minimum-displacement branch relative to the current joint angles with an L2 norm on the joint error.
+As for the target-pose, we choose the pose where the elbow angle is positive, which recruits the strong, low-frequency elbow$+$ muscle rather than the weak, 
+high-frequency elbow$-$ muscle, motivated by our discussion on the low-pass structure of the brain (more in \S\ref{sec:results}). With the target pose fixed,
+each joint error emits a select tone of amplitude $a=\mathrm{clip}(k|e|,a_{\min},a_{\max})$, and inside a deadzone the tones drop 
+and stiction holds the pose. To counteract the remaining asymmetry in the brain's high-frequency attenuation, the elbow's command is scaled by an empirical scalar multiplier ($a \leftarrow a \cdot \alpha_{\text{elbow}}$)
+to equalize joint authorities. Inside a tracking deadzone, the tones drop to zero and physical stiction holds the pose. The four select frequencies and the joint map are calibrated once offline 
+(Fig.~\ref{fig:cal}).
 
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
 \includegraphics[width=0.78\linewidth]{calibration.png}
 \caption{Offline calibration: sweeping the select frequency and measuring steady joint
@@ -337,13 +305,10 @@ low-pass roll-off of \S\ref{sec:lowpass} seen at the actuator level.}
 \section{Evaluation methodology and results}
 \label{sec:results}
 \textbf{Methodology.} All controllers are run through the group-standard harness for
-commensurability: an identical polar target grid (radii $\{20,38,55\}$\,cm $\times$ $8$
+commensurability: an identical polar target grid (radii $\{20,38,55\}$\,cm $\times$ $10$
 angles), a fixed brain seed, horizon $T{=}1000$, and six metrics chosen to expose
-distinct behaviours --- final distance (task error), time-to-threshold
-(responsiveness), steady-state distance (settling), the \emph{shoulder/elbow}
-decomposition (which localises failure), control effort (efficiency/saturation), and a
-spatial heatmap (the \emph{structure} of success). The grid spans the whole workspace
-because the failure turns out to be directional and a few targets would hide it.
+distinct behaviours : final distance, time-to-threshold, steady-state distance (settling), the shoulder/elbow
+decomposition, control effort, and a spatial heatmap for visualisation. 
 
 \begin{figure}[t]
 \centering
@@ -353,73 +318,43 @@ power ramp then a plateau with a wide band (bimodal). (b,c) The shoulder error f
 but the \emph{elbow} error stays high. (d) The final-distance heatmap is sharply
 \emph{directional}: a reachable upper/right region ($\le 12$\,cm) and a red
 lower/far-left shortfall ($53$--$103$\,cm). (e) Example reach. (f) Effort is flat across
-radius --- the failing targets spend effort without converging (an actuation limit).}
+radius --- the failing targets spend effort without converging.}
 \label{fig:eval}
 \end{figure}
 
-\textbf{Aggregate.} On the grid (Fig.~\ref{fig:eval}) the final distance is
+On the grid (Fig.~\ref{fig:eval}) the final distance is
 $32.3\pm33.4$\,cm, shoulder error $19.3\pm23.1^\circ$, elbow error
 $53.1\pm63.0^\circ$, time-to-threshold $401\pm211$ steps, effort near-constant
 ($617\pm23$). Every standard deviation rivals its mean: the average hides a sharply
 \emph{bimodal} outcome.
 
-\textbf{A directional failure, predicted by the low-pass model.} Splitting by workspace
-half:
-\begin{center}\small
-\begin{tabular}{lccc}
-\toprule
-half & final dist.\ & $|$sh.\ err$|$ & $|$el.\ err$|$\\
-\midrule
-upper ($y>0$) & $5.7$\,cm & $7^\circ$ & $7^\circ$\\
-lower ($y<0$) & $61.6$\,cm & $47^\circ$ & $101^\circ$\\
-\bottomrule
-\end{tabular}
-\end{center}
-The upper half is reached to a few cm; the lower half misses by $\sim$60\,cm, almost
-entirely in elbow error. The two halves recruit different members of each antagonist
-pair, and measured joint authority falls monotonically with frequency --- shoulder$+$
-($0.073$) gives $9.7$\,rad of travel, shoulder$-$ ($0.133$) $2.0$, elbow$+$ ($0.207$)
-$2.0$, elbow$-$ ($0.312$) only $0.9$ --- exactly the ordering of the low-pass roll-off
-(\S\ref{sec:lowpass}): the highest-frequency muscle, elbow$-$, is near-dead, so the
+\textbf{A directional failure, predicted by the low-pass model.}
+We notice that the upper half of the reachable space is reached to a few cm; while the 
+lower half misses by $\sim$60\,cm, dominated by elbow error. The two halves recruit 
+different members of each antagonist pair, and measured joint authority falls monotonically 
+with frequency: shoulder$+$ ($0.073$) gives $9.7$\,rad of travel, shoulder$-$ ($0.133$) $2.0$, elbow$+$ ($0.207$)
+$2.0$, elbow$-$ ($0.312$) only $0.9$, following the ordering of the low-pass roll-off we noticed from
+(\S\ref{sec:lowpass}). The highest-frequency muscle, elbow$-$, is near-dead, so the
 lower half is reach-limited. The flat effort across radius (Fig.~\ref{fig:eval}f)
-confirms an \emph{actuation} limit, not under-driving: more stimulation would not help.
+confirms an actuation limit rather than under-driving.
 
-\textbf{Generalisation and the value of feedback.} Calibration is done once but every
-trial is a new random brain; across five seeds the controller reaches a median
-$10.2$\,cm with $93\%$ within $15$\,cm --- the brain-invariant structure transfers and
-the loop absorbs each brain's gain. V1 (hand feedback) reaches median $10.2$\,cm; V2
-(neural observer only) reaches $33.7$\,cm with $0\%$ within $15$\,cm
-(Fig.~\ref{fig:v1v2}): the observer drifts on the $\sim$$10\times$ noisier
-single-sample neural, so the $\sim$24\,cm gap quantifies the worth of direct hand
-sensing. The two share the entire control law and differ only in the joint estimate, so
-this is a clean measurement of feedback's value rather than a tuning difference.
+\section{Strengths, limitations, alternatives, and future work}
+\textbf{Strengths :} The controller exploits rather than fights the decoder (frequency
+selection, free power), needs no online model inversion, generalises across brains, and
+its failure is interpretable and traceable to one measured cause.
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=0.7\linewidth]{v1_v2.png}
-\caption{Mean distance-to-target for V1 (hand feedback) and V2 (neural observer, no hand
-feedback). V1 converges below the $15$\,cm threshold; V2 plateaus far above it as the
-forward observer, fed the single noisy neural sample, accumulates joint-angle drift.}
-\label{fig:v1v2}
-\end{figure}
+\textbf{Limitations :} The directional failure stemming from the brain's low-pass roll-off as discussed severely under-actuates the high-frequency elbow muscle.
+ This attenuation is compounded during simultaneous multi-joint movements, as the shared [0, 1] input budget forces the already starved elbow to compete with the 
+ shoulder for limited control authority. Furthermore, the asymmetric dynamics of the muscle head characterized by a slow power ramp and a fast exit establish a 
+ strict resolution floor. Because the smallest effective stimulation burst often exceeds the micro-correction required near the target, the controller tends to overshoot and "hunt" around the setpoint.
+  As a result, ultimate steady-state precision is inherently bounded by the arm's friction deadzone, since the controller cannot easily punch through stiction without triggering this overshoot limit-cycle. 
+  
 
-\textbf{A methodological result on tuning.} On the calibration brain alone, raising the
-elbow gain improves accuracy; cross-seed validation \emph{overturns} this --- reliability
-falls from $90\%$ to $65\%$ as it is raised, because over-driving the elbow on brains
-where it is adequate induces overshoot. Single-brain tuning over-fits; parameters must
-be chosen by cross-seed reliability. The deadzone, by contrast, is nearly inert.
-
-\section{An attempted improvement: muscle-aware kinematic redundancy}
-\label{sec:improve}
-The directional failure of \S\ref{sec:results} is not purely an actuation limit --- it
-is partly self-inflicted. Almost every hand target is reachable in \emph{two} arm
-configurations, elbow-up ($+|\theta_{\mathrm{el}}|$) and elbow-down
-($-|\theta_{\mathrm{el}}|$), and the controller's default chooses the branch nearest
-the home pose; for the lower workspace that branch demands the weak, high-frequency
-elbow$-$ muscle. Forcing the \emph{elbow-up} branch instead reaches the same Cartesian
-point with the strong, low-frequency elbow$+$ muscle. This is a one-line change to the
-target inverse kinematics requiring no re-calibration, and its effect is decisive:
-
+\textbf{An attempted improvement: kinematic redundancy} As discussed in our controller design, almost every target is reachable in
+\emph{two} arm configurations, elbow-up ($+|\theta_{\mathrm{el}}|$) and elbow-down, and
+the controller's default chooses the branch nearest the home pose based on the L2 error, which for the lower
+workspace demands the weak, high-frequency elbow$-$ muscle. Forcing the elbow-up
+branch reaches the same Cartesian point with the strong, low-frequency elbow + muscle, which is less affected by the brain's low-pass roll-off. 
 \begin{center}\small
 \begin{tabular}{lccc}
 \toprule
@@ -430,57 +365,18 @@ default (nearest home) & $34.7$\,cm & $61.6$\,cm & $46\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
-
-The lower half collapses from $61.6$ to $12.7$\,cm and reliability nearly doubles. This
-both confirms the diagnosis --- the failure was the controller \emph{asking for} an
-attenuated muscle --- and shows that exploiting the arm's kinematic redundancy to route
-the task onto muscles inside the brain's well-actuated band is the highest-leverage
-fix. It is the frequency-domain insight applied at the kinematic level. (The default is
-retained as the baseline reported in \S\ref{sec:results}; the improvement is exposed as
-a controller flag.)
-
-\section{Strengths, limitations, alternatives, and future work}
-\textbf{Strengths.} The controller exploits rather than fights the decoder (frequency
-selection, free power), needs no online model inversion, generalises across brains, and
-its failure is interpretable and traceable to one measured cause.
-
-\textbf{Limitations.} (i) \emph{Elbow under-actuation} from the low-pass roll-off
-dominates (the directional failure). (ii) The shared $[0,1]$ budget starves the weak
-elbow when both joints move. (iii) \emph{Overshoot}: the head's slow power ramp and
-fast exit make the smallest effective stimulation larger than the final correction, so
-the hand hunts. (iv) V2 shows the method leans on hand sensing. (v) Steady-state
-precision is bounded by the friction deadzone.
-
-\textbf{Alternatives and the 2-DOF synthesis.} The rejected schemes each fail a hard
-requirement: setpoint LQG/LQI cannot produce oscillation; pure Fourier feed-forward
-cannot cross the nonlinearity or stabilise the integrator; nonlinear MPC needs an
-honest constrained model of the unknown stack. The coherent picture is a
-\emph{two-degree-of-freedom} design --- frequency-matching feed-forward inside, a single
-position feedback loop outside --- which is what we built; linear MPC would be the
-natural upgrade to the inner loop to handle the $[0,1]$ clip honestly. Within the group,
-a time-domain primitive finite-state-machine controller rests on the \emph{same} four
-rhythmic primitives but sequences them as discrete bursts; strikingly, both structurally
-different controllers hit the \emph{same} precision wall, evidence that the binding limit
-is the plant (power ramp/exit asymmetry and stiction granularity), not the control law.
-
-\textbf{Future work.} Beyond the kinematic-redundancy fix already demonstrated
-(\S\ref{sec:improve}), two improvements remain. A \emph{per-trial elbow
-self-calibration} (a short probe at trial start) would replace the fixed elbow gain
-that over-fits one brain (\S\ref{sec:results}); and \emph{sub-primitive actuation} ---
-graded micro-bursts or amplitude annealing on approach --- would beat the overshoot wall
-that no high-level controller removes, the limit shared with the group's time-domain
-controller.
-
+Tracking the differences between the two applications, the lower half collapses from $61.6$ to $12.7$\,cm and reliability nearly doubles,
+confirming the diagnosis. Routing the task onto muscles in the brain's well-actuated band by applying our frequency-domain insight applied
+at the kinematic level provided signifcantly improved results.
+\textbf{Future work :} Beyond the attempted improvement to resolve the attenuation of high-frequency muscles, the limitation of the resolution floor which contributed 
+to the hunting behaviour near the target could be mitigated by implementing a hybrid control strategy that switches to a more conservative, low-frequency stimulation pattern as the hand approaches the target, reducing overshoot and improving steady-state precision. 
+Additionally, exploring adaptive control techniques that can learn to compensate for the brain's low-pass characteristics over time may further enhance performance, especially in the presence of variability across different brain seeds or changes in the system dynamics.
 \section{Conclusion}
-The arc is one of progressive simplification driven by understanding the plant: blind
-estimation gave way to active, subspace-warm-started identification once inputs were
-known; the rhythm-coded decoder forced a frequency-domain view; and identifying the
+The arc is one of progressive simplification driven by understanding the plant, built upon explorations of
+system identification both blind and informed; the rhythm-coded decoder forced a frequency-domain view; and identifying the
 brain as a first-order low-pass system collapsed the inner control problem to open-loop
 frequency matching with a single outer position loop, justified because the controller
-horizon dwarfs the brain's transient. The result is simple and generalises, and its one
-dominant limitation --- a weak, high-frequency elbow --- is not a tuning artefact but the
-inevitable image of the brain's low-pass roll-off at the actuator. The two transferable
-lessons are that direct hand sensing is worth $\sim$24\,cm here, and that on a
-stochastic, varying plant rigorous evaluation must be cross-seed.
-
+horizon dwarfs the brain's transient, as well as predicting the directional failure of the under-actuated elbow joint.
+Our final controller achieves reasonable performance for its simple model-free design, with limitations directly attributable to the brain's low-pass structure.
+Future work will explore more sophisticated control architectures that can better navigate the trade-offs imposed by the brain's dynamics and the muscle head's nonlinearities, as well as investigating adaptive strategies that can learn to compensate for these limitations over time.
 \end{document}
