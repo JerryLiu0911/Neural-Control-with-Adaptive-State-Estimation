@@ -202,6 +202,11 @@ def _warm_start(U, Y, n):
     observability matrix -> (C, A) via shift-invariance. With (A, C) fixed,
     (B, x0) follow from a linear least-squares against the known data. Valid for
     n > p, and seeds a real B (unlike the output-only / random start).
+
+    parameters
+    ----------
+    U, Y : (T, m) / (T, p) probing inputs and recorded observations.
+    n : latent state dimension to fit (can be > p, unlike the PCA warm start).
     """
     U = np.asarray(U, float); Y = np.asarray(Y, float)
     T, p = Y.shape

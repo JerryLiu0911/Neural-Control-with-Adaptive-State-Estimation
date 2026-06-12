@@ -56,6 +56,19 @@ def _wrap(a):
     return float(np.arctan2(np.sin(a), np.cos(a)))
 
 
+def ik_elbow_up(x, y):
+    """The elbow-up (positive elbow angle) inverse-kinematics solution. Reaching a
+    positive elbow angle from the home pose recruits the *strong*, low-frequency
+    elbow+ muscle rather than the weak, high-frequency elbow- one, so selecting
+    this branch as the target greatly improves the otherwise reach-limited
+    lower workspace (see report)."""
+    r2 = x * x + y * y
+    cos_el = np.clip((r2 - 2 * ARM_LINK ** 2) / (2 * ARM_LINK ** 2), -1.0, 1.0)
+    el = float(np.arccos(cos_el))
+    sh = np.arctan2(y, x) - np.arctan2(ARM_LINK * np.sin(el), ARM_LINK + ARM_LINK * np.cos(el))
+    return float(np.arctan2(np.sin(sh), np.cos(sh))), el
+
+
 # --------------------------------------------------------------------------- #
 #  low-level: synthesise a two-tone (or multi-tone) brain input sample
 # --------------------------------------------------------------------------- #
@@ -196,7 +209,8 @@ class HandController:
 
     def __init__(self, primitives, *, bias=0.5, mode="hand", k_gain=1.0,
                  a_min=0.14, a_max=0.34, tol=0.05, a_total_cap=0.48,
-                 elbow_boost=1.7, obs_smooth=0.0):
+                 elbow_boost=1.7, obs_smooth=0.0, strong_branch=False):
+        self.strong_branch = strong_branch   # target the elbow-up IK branch (strong muscle)
         self.prim = {(p["joint"], p["sign"]): p["f"] for p in primitives}
         self.bias = bias; self.mode = mode; self.k = k_gain
         self.a_min = a_min; self.a_max = a_max; self.tol = tol; self.cap = a_total_cap
@@ -212,7 +226,8 @@ class HandController:
     def __call__(self, observations, target, current_pos):
         t = len(observations)
         if self.tgt is None:
-            self.tgt = ik(target[0], target[1], 0.0, 0.0)
+            self.tgt = ik_elbow_up(target[0], target[1]) if self.strong_branch \
+                else ik(target[0], target[1], 0.0, 0.0)
         # joint estimate
         if self.mode == "neural":                       # V2: neural observer, no hand feedback
             if observations:

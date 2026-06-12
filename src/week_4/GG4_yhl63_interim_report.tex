@@ -1,0 +1,156 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{abstract}
+\usepackage{graphicx}
+
+\hypersetup{colorlinks=true, linkcolor=black, citecolor=black, urlcolor=blue}
+
+\titleformat{\section}{\large\bfseries}{\thesection.}{0.6em}{}[\vspace{-0.2em}\rule{\linewidth}{0.4pt}]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.2ex plus 0.5ex}{0.8ex}
+\titlespacing*{\subsection}{0pt}{0.9ex plus 0.3ex}{0.4ex}
+
+\renewcommand{\abstractnamefont}{\normalfont\bfseries}
+\setlength{\absleftindent}{0pt}
+\setlength{\absrightindent}{0pt}
+
+\title{\textbf{GG4 Neural Control with Adaptive State Estimation First Interim Report}\\[0.4em]\large\textit{Latent State and Input Estimation from Observations}}
+\author{Jerry Liu (yhl63) \\}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\begin{abstract}
+This report documents the design process for building an estimator for latent state variables and unknown inputs from observations alone, given knowledge of the latent and input dimensions. Because both the system dynamics and the inputs are unknown, the problem is fundamentally ill-posed. We assume a linear-Gaussian (LG) state-space model and attempt to address the two core sub-problems: \emph{system identification} (estimating matrices $A, B, C, Q, R$) and \emph{state/input estimation}.
+We justify our design choices in increasing complexity from our initial assumptions and intuitions from week 1 to the resulting constrained expectation--maximisation with Kalman--RTS smoothing on an augmented state that folds the unknown input into the latent.
+\end{abstract}
+
+\section{Motivation and Problem Statement}
+
+The central goal is to construct an estimator that recovers both the latent state trajectory $x_t \in \mathbb{R}^n$ and the forcing input $u_t \in \mathbb{R}^m$ from the observation sequence $y_t \in \mathbb{R}^p$ alone, given only the dimensions $n$ and $m$. Since neither the system dynamics nor the inputs are observed, there can be multiple solutions: a continuum of $(x, u)$ pairs can reproduce any given output sequence (Consider being able to apply any invertible linear transform to the states). However, we can adapt a Bayesian approach by positing a linear-Gaussian model and addressing system identification and state/input estimation jointly within an EM framework.
+
+\section{Preliminary Work (week 1): the \texttt{l4b} Toolkit}
+
+Week~1 produced \texttt{l4b}, a library that operationalises the LG state-space model and supplies the analytical primitives consumed by the estimation pipeline.
+
+\begin{sloppypar}
+The \texttt{Simulator} integrates the forward model for arbitrary $(A, B, C, Q, R)$ with initial conditions that can be constructed from \texttt{InputSignal}/\texttt{InputBuilder}. Other modules compute controllability and observability Gramians, eigen-spectra, and eigenpair decompositions allowing for system analysis, as well as an implementation of the Kalman filter. The \texttt{Illustrator} allows us to perform exploratory analysis of the data, plotting trial-averaged traces, as well as statistical results from the \texttt{stats} modules such as correlation, PCA, autocorrelation, cross-correlation, power spectra, and magnitude-squared coherence which can be done through a single \texttt{plot\_all()} call.
+\end{sloppypar}
+
+For a stable LG-SSM driven by white Gaussian noise, the output power spectrum is a smooth rational function of frequency, entirely determined by the poles of $A$ and the noise variances. A spectrum dominated by low frequencies with no narrow-band peaks is therefore consistent with the model; harmonic lines or broadband non-monotone structure would demand a non-linear or non-Gaussian alternative. Similarly, autocorrelation of the observations should decay as a mixture of real exponentials and damped sinusoids; departure from this form signals that the Markov assumption is violated or that the dynamics are non-linear.
+PCA on the observations identifies the effective observation rank and sets a ceiling on the meaningful latent dimension $n$. 
+
+\section{Methods}
+
+Following our intuition from week 1, we gradually developed the complexity of our estimator model, attempting to address the limitations of each and how they adhere to the requirement to return both a latent-state trajectory \emph{and} an input trajectory of the prescribed dimensions.
+
+\subsection{Static PCA}
+
+Our intuition from week 1 led us to consider decompositioning the observations into latent states through PCA after mean-centring, as it offers a simple and interpretable approach to obtaining orthogonal and variance-ranked latent dimensions. Mean-centering was chosen as to avoid the trivial solution of the first principal component being the mean across the dimensions, whereas we are more interested in the variation of the data. 
+Writing $\mu$ for the sample mean and $\Sigma = \frac{1}{T}\sum_t (y_t - \mu)(y_t - \mu)^\top$ for the sample covariance, the latent is the projection onto the leading eigenvectors $W \in \mathbb{R}^{p \times n}$ of $\Sigma$:
+\begin{equation}
+\hat{x}_t = W^\top(y_t - \mu).
+\end{equation}
+In the well-observed regime ($p > n$, $C$ full column rank) the recovered latent is a linear image $Mx_t$ of the true state and inherits the underlying linear dynamics. However, since each time point is treated independently, the method is blind to temporal structure, and therefore does not utilise the linear model we have assumed. Moreover, the method returns no input channel, so the entire latent subspace is effectively forced to explain the dynamics of the inputs as well as the state, making the system effectively independent from the inputs.
+
+\subsection{Moving-Window-Average PCA}
+
+To address the lack of temporal structure, we attempt to smooth the static latent with a causal moving average of width $L$, $\tilde{x}_t = L^{-1}\sum_{i=0}^{L-1}\hat{x}_{t-i}$, suppresses high-frequency noise but introduces a group delay of approximately $(L-1)/2$ samples, whereas a centred average removes the delay only by becoming non-causal. The fixed window length also becomes a hyperparameter for which we need to optimise, and therefore the appropriate conclusion is to learn the temporal weighting from data rather than prescribe it.
+
+\subsection{Singular Spectrum Analysis via Hankel Embedding}
+
+Further research led us to discover data-driven temporal weighting, which can be achieved by applying PCA to a causal time-delay embedding; also known as the Hankel matrix of the observations,
+\begin{equation}
+Y_t = \bigl[y_t^\top,\, y_{t-1}^\top,\, \ldots,\, y_{t-L+1}^\top\bigr]^\top \in \mathbb{R}^{pL},
+\end{equation}
+whose eigenvectors are spatiotemporal patterns rather than purely spatial ones (multivariate SSA, equivalently dynamic PCA). The construction recovers lagged and oscillatory structure to which static PCA is blind and is particularly advantageous when $p < n$, where a single time sample is insufficient to determine the state. When $p > n$, however, as the case for our originally considered dimensionality reduction method with PCA, the embedding offers no advantage and can dilute the $n$ informative directions across the $pL$-dimensional space, since the space is now much larger compared to PCA, and hence we may be constrainged to finding higher dimensional state representations.
+More importantly, this method still provides no input channel; its enduring contribution is motivating the move to a model that generates a temporal structure rather than merely extracting it. 
+
+\subsection{The Augmented State as a Bridge}
+ 
+The three constructions previously all share the same shortcoming of being unable to return an input. However, we notice a consistent pattern of there being established methods in estimating latent states from observations; the structural move that closes this gap is to refuse the distinction between the state and the input at the level of the model. Both are unobserved quantities driving the observations; both evolve in time; and both must be inferred from $y_{1:T}$. Stacking them into a single augmented latent $z_t = [x_t^\top,\, u_t^\top]^\top$, and assuming an AR(1) temporal model for $u_t$, allowing us to model the block-triangular dynamics :
+\begin{equation}
+z_{t+1} = \begin{bmatrix} A & B \\ 0 & I \end{bmatrix} z_t + \tilde{w}_t, \qquad y_t = \begin{bmatrix} C & D \end{bmatrix} z_t + v_t
+\end{equation}
+
+The advantage of this reformulation is that it converts a problem outside the scope of the preceding methods into one that is within the scope of a single, well-understood algorithm. Smoothing of the augmented latent returns the state in its leading $n$ coordinates and the input in its trailing $m$ coordinates, in one pass. The same Kalman filter and RTS smoother that were unavailable to PCA-based methods, are now available for both quantities the interface requires. The conceptual cost of the augmentation is the explicit input prior and the exogeneity constraint, whose identifying role is examined in later sections.
+
+
+\subsection{From Variance to Predictability: EM-Kalman Smoothing}
+
+With the augmented model in hand, we shift our focus to estimating the
+system matrices (A, B, C, D, Q, R) jointly with the augmented latent
+trajectory $z_{1:T}$ from observations alone, which allows us to frame
+the estimation as a EM problem, alternating latent inference and parameter identification through Kalman--RTS smoothing and closed-form regression between the augmented states to find our model parameters. The E-step and M-step are as follows:
+
+\begin{itemize}[leftmargin=1.5em, itemsep=0.1em]
+\item \textbf{E-step.} The RTS smoother returns the smoothed moments
+  $\mathbb{E}[z_t \mid y_{1:T}]$, $\mathrm{Cov}[z_t \mid y_{1:T}]$, and
+  the lag-one cross-covariance, which are sufficient statistics for the
+  M-step.
+\item \textbf{M-step.} The free blocks $(A, B, C, D, Q, R)$ are updated
+  by closed-form linear regression of the smoothed state on its lag and
+  of the observation on the smoothed state. The input block $[0\;I]$
+  and input-prior covariance $\Sigma_u$ are held fixed; this constraint
+  is the mechanism by which an ``input'' subspace is distinguished
+  within the augmented state.
+\end{itemize}
+
+Tying together with our previous discussion, we use the PCA projection of the observations ($C$ from the
+leading $n$ singular vectors; $A$ from one-step least-squares regression
+on the PCA scores) as initialisations for the EM-algorithm, supplemented by a small number of random restarts to
+guard against local optima.
+
+\section{Discussion}
+\subsection{Model Limitations}
+As discussed in the our derivation of the augmented states, the augmentation is dependent on a substantive assumption
+about the unknown input as an AR(1) process,
+$u_{t+1} = u_t + \eta_t$ with $\eta_t \sim \mathcal{N}(0, \Sigma_u)$.
+which acts to constrain the smoother to differentiate between process noise
+and input from the residuals of the state estimation. The random-walk prior therefore
+expresses a preference for smoothly-varying inputs, which is a common assumption in control settings and is appropriate for many real-world driving signals. However, it also means that inputs with energy concentrated in sharp transitions (square waves, step changes) or isolated samples (impulse trains) are recovered only approximately. 
+
+Two extensions may address this : By replacing the Gaussian
+increment penalty with a heavy-tailed or sparsity-promoting prior
+(e.g.\ Student-$t$ or Laplace on the increments), we preserve the
+conditional-Gaussian structure that keeps the smoother tractable and
+yields a reweighted Kalman smoother capable of representing step
+changes and impulses without the systematic attenuation above. The
+second parameterises $u_t$ as a linear combination of a fixed basis
+(Fourier, B-spline, indicator functions), reducing the input degrees of
+freedom from $Tm$ to a small coefficient set and representing
+oscillatory or impulsive inputs exactly when the basis is matched to
+the input class.
+
+\subsection{Implementation limitations}
+To satisfy the function signature, All hyperparameters such as the iteration cap, restart count, convergence tolerance, and the form of the input prior are all fixed in code before submission. 
+EM optimises the marginal log-likelihood of the observations,
+which is a sum of one-step predictive innovation likelihoods weighted
+by their predictive uncertainties; it is not the same quantity as
+reconstruction error on $y$, and it has no direct relationship to the
+accuracy of the recovered latent trajectories against ground truth.
+A more thorough assessment could be to supplement the likelihood-based
+identification with reconstruction metrics such as mean-squared error on
+the reconstructed observation channels under the identified parameters,
+ideally separated by channel to expose any systematic bias. Other considerations in the future may include methods
+to estimate the latent and input dimensions from data, as well as to perform model selection to other methods such as stochastic subspace identification or non-parametric methods with AIC metrics.
+
+\section*{Appendix}
+\begin{figure}[h]
+		\centering
+		\includegraphics[width=0.5\textwidth]{"1010.png"}
+        \caption{The recovered latent and input trajectories from the EM-Kalman smoother for a 10-dimensional latent and 10-dimensional input. In order from top to bottom, the plots show the provided observations, the estimated states, the estimated inputs and the reconstructed outputs from the model parameters and input/state conditions.}
+	\label{fig:rotation-only}
+\end{figure}
+\end{document}

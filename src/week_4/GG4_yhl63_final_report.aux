@@ -1,0 +1,39 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Problem Definition and Introduction}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}From blind estimation to active probing}{1}{section.2}\protected@file@percent }
+\newlabel{sec:est}{{2}{1}{From blind estimation to active probing}{section.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces The persistently-exciting probe: multi-level, piecewise-constant signals with holds across timescales. }}{2}{figure.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:input}{{1}{2}{The persistently-exciting probe: multi-level, piecewise-constant signals with holds across timescales}{figure.caption.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Model order selection diagnostics. Held-out predictive score (left) and singular-value spectrum of the block-Hankel matrix (right) both suggest retaining $n=6$ modes, with a clear gap after $n=2$ and a noise floor from $n\approx 6$ onward.}}{3}{figure.caption.2}\protected@file@percent }
+\newlabel{fig:model_order}{{2}{3}{Model order selection diagnostics. Held-out predictive score (left) and singular-value spectrum of the block-Hankel matrix (right) both suggest retaining $n=6$ modes, with a clear gap after $n=2$ and a noise floor from $n\approx 6$ onward}{figure.caption.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}The BMI structure forces a frequency-domain view}{3}{section.3}\protected@file@percent }
+\newlabel{sec:bmi}{{3}{3}{The BMI structure forces a frequency-domain view}{section.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}System identification and why it struggles}{3}{section.4}\protected@file@percent }
+\newlabel{sec:sysid}{{4}{3}{System identification and why it struggles}{section.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Empirical (black/grey) vs.\ identified-model (red/blue) principal gains (left) and relative reconstruction error (right). $\sigma _1$ is captured at low frequency; $\sigma _2$ is badly under-modelled and the error grows with frequency, where coherence collapses --- the regime the controller must avoid.}}{4}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:frf}{{3}{4}{Empirical (black/grey) vs.\ identified-model (red/blue) principal gains (left) and relative reconstruction error (right). $\sigma _1$ is captured at low frequency; $\sigma _2$ is badly under-modelled and the error grows with frequency, where coherence collapses --- the regime the controller must avoid}{figure.caption.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}The brain is a first-order low-pass system}{4}{section.5}\protected@file@percent }
+\newlabel{sec:lowpass}{{5}{4}{The brain is a first-order low-pass system}{section.5}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces The identified brain's dominant gain $\sigma _1(f)$ (markers) against a first-order low-pass fit (red, $R^2{=}0.998$, pole $0.94$). The muscle frequencies sit far above the $-3$dB cutoff, on the roll-off.}}{5}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:lp}{{4}{5}{The identified brain's dominant gain $\sigma _1(f)$ (markers) against a first-order low-pass fit (red, $R^2{=}0.998$, pole $0.94$). The muscle frequencies sit far above the $-3$dB cutoff, on the roll-off}{figure.caption.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Initial control: setpoint LQG/LQI, and why it changes}{5}{section.6}\protected@file@percent }
+\newlabel{sec:lqg}{{6}{5}{Initial control: setpoint LQG/LQI, and why it changes}{section.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}The final controller: frequency-multiplexed joint servo}{6}{section.7}\protected@file@percent }
+\newlabel{sec:final}{{7}{6}{The final controller: frequency-multiplexed joint servo}{section.7}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Offline calibration: sweeping the select frequency and measuring steady joint velocity exposes four band-pass muscle peaks. Higher-frequency peaks are weaker --- the low-pass roll-off of \S  \ref {sec:lowpass} seen at the actuator level.}}{7}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:cal}{{5}{7}{Offline calibration: sweeping the select frequency and measuring steady joint velocity exposes four band-pass muscle peaks. Higher-frequency peaks are weaker --- the low-pass roll-off of \S \ref {sec:lowpass} seen at the actuator level}{figure.caption.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}Evaluation methodology and results}{7}{section.8}\protected@file@percent }
+\newlabel{sec:results}{{8}{7}{Evaluation methodology and results}{section.8}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces Standardised evaluation (seed 0, $T{=}1000$). (a) Distance: a $\sim $150-step power ramp then a plateau with a wide band (bimodal). (b,c) The shoulder error falls but the \emph  {elbow} error stays high. (d) The final-distance heatmap is sharply \emph  {directional}: a reachable upper/right region ($\le 12$\,cm) and a red lower/far-left shortfall ($53$--$103$\,cm). (e) Example reach. (f) Effort is flat across radius --- the failing targets spend effort without converging (an actuation limit).}}{8}{figure.caption.6}\protected@file@percent }
+\newlabel{fig:eval}{{6}{8}{Standardised evaluation (seed 0, $T{=}1000$). (a) Distance: a $\sim $150-step power ramp then a plateau with a wide band (bimodal). (b,c) The shoulder error falls but the \emph {elbow} error stays high. (d) The final-distance heatmap is sharply \emph {directional}: a reachable upper/right region ($\le 12$\,cm) and a red lower/far-left shortfall ($53$--$103$\,cm). (e) Example reach. (f) Effort is flat across radius --- the failing targets spend effort without converging (an actuation limit)}{figure.caption.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {9}An attempted improvement: muscle-aware kinematic redundancy}{8}{section.9}\protected@file@percent }
+\newlabel{sec:improve}{{9}{8}{An attempted improvement: muscle-aware kinematic redundancy}{section.9}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces Mean distance-to-target for V1 (hand feedback) and V2 (neural observer, no hand feedback). V1 converges below the $15$\,cm threshold; V2 plateaus far above it as the forward observer, fed the single noisy neural sample, accumulates joint-angle drift.}}{9}{figure.caption.7}\protected@file@percent }
+\newlabel{fig:v1v2}{{7}{9}{Mean distance-to-target for V1 (hand feedback) and V2 (neural observer, no hand feedback). V1 converges below the $15$\,cm threshold; V2 plateaus far above it as the forward observer, fed the single noisy neural sample, accumulates joint-angle drift}{figure.caption.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {10}Strengths, limitations, alternatives, and future work}{9}{section.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {11}Conclusion}{10}{section.11}\protected@file@percent }
+\gdef \@abspage@last{10}
